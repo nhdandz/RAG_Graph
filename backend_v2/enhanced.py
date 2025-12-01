@@ -40,7 +40,6 @@ class Config:
     # Gemini API
     GEMINI_API_KEY = "AIzaSyDigZIj90ppAcue0sWm85ODzB6KIu62ub8"
     LLM_MODEL = "gemini-2.5-flash"  # Gemini 2.5 Flash
-    FALLBACK_LLM_MODEL = "qwen3:8b"  # Ollama fallback nếu Gemini fail
     EMBEDDING_MODEL = "bge-m3"  # Giữ nguyên Ollama embedding
 
     # Feature flags
@@ -423,19 +422,9 @@ TRẢ LỜI
 ════════════════════════════════════════════════════════════════
 """
     print(context)
-
-    # Thử Gemini trước
     try:
-        print("🔷 Trying Gemini 2.5 Flash...")
-        model = genai.GenerativeModel(
-            config.LLM_MODEL,
-            safety_settings={
-                "HARASSMENT": "BLOCK_NONE",
-                "HATE_SPEECH": "BLOCK_NONE",
-                "SEXUALLY_EXPLICIT": "BLOCK_NONE",
-                "DANGEROUS_CONTENT": "BLOCK_NONE",
-            }
-        )
+        # Sử dụng Gemini 2.0 Flash
+        model = genai.GenerativeModel(config.LLM_MODEL)
         response = model.generate_content(
             prompt,
             generation_config=genai.GenerationConfig(
@@ -444,38 +433,10 @@ TRẢ LỜI
                 max_output_tokens=2048,
             )
         )
-
-        # Kiểm tra response
-        if response.candidates:
-            candidate = response.candidates[0]
-            if candidate.finish_reason == 1:  # STOP = success
-                print("✅ Gemini response successful")
-                return response.text
-            else:
-                print(f"⚠️ Gemini blocked - finish_reason: {candidate.finish_reason}")
-                print(f"⚠️ Safety ratings: {candidate.safety_ratings}")
-        else:
-            print("⚠️ No candidates from Gemini")
-
+        return response.text
     except Exception as e:
-        print(f"⚠️ Gemini error: {e}")
-
-    # Fallback về Ollama Qwen3:8b
-    try:
-        print(f"🔶 Falling back to Ollama {config.FALLBACK_LLM_MODEL}...")
-        response = ollama.generate(
-            model=config.FALLBACK_LLM_MODEL,
-            prompt=prompt,
-            options={
-                "temperature": 0.3,
-                "top_p": 0.9,
-            }
-        )
-        print("✅ Ollama response successful")
-        return response['response']
-    except Exception as e:
-        print(f"❌ Ollama error: {e}")
-        raise HTTPException(status_code=500, detail=f"Both Gemini and Ollama failed. Last error: {str(e)}")
+        print(f"LLM error: {e}")
+        raise HTTPException(status_code=500, detail=f"LLM error: {str(e)}")
 
 
 @app.post("/api/documents/load-from-json")
