@@ -1,0 +1,90 @@
+[
+  {
+    "chunk_id": "chunk_001",
+    "content": "RAG (Retrieval Augmented Generation) là một kỹ thuật kết hợp giữa hệ thống truy xuất thông tin và mô hình ngôn ngữ lớn. RAG giúp cải thiện độ chính xác của câu trả lời bằng cách tìm kiếm thông tin liên quan trước khi sinh câu trả lời.",
+    "metadata": {
+      "section_code": "I",
+      "section_type": "root",
+      "section_title": "Giới thiệu về RAG",
+      "tags": ["rag", "retrieval", "llm"],
+      "title_path": ["Giới thiệu về RAG"]
+    }
+  },
+  {
+    "chunk_id": "chunk_002",
+    "content": "Hệ thống RAG hoạt động theo 3 bước chính: 1) Embedding - chuyển văn bản thành vector, 2) Retrieval - tìm kiếm các đoạn văn bản liên quan nhất, 3) Generation - sử dụng LLM để sinh câu trả lời dựa trên context đã tìm được.",
+    "metadata": {
+      "section_code": "II",
+      "section_type": "chuong",
+      "section_title": "Cách hoạt động của RAG",
+      "tags": ["embedding", "retrieval", "generation"],
+      "title_path": ["Cách hoạt động của RAG"]
+    }
+  },
+  {
+    "chunk_id": "chunk_003",
+    "content": "BM25 là một thuật toán ranking phổ biến trong information retrieval. BM25 tính điểm relevance dựa trên tần suất xuất hiện của từ trong document và inverse document frequency. Inverted Index giúp tăng tốc BM25 lên 100x bằng cách chỉ xử lý các document chứa query terms.",
+    "metadata": {
+      "section_code": "III.1",
+      "section_type": "muc",
+      "section_title": "Thuật toán BM25",
+      "tags": ["bm25", "ranking", "search"],
+      "title_path": ["Kỹ thuật tìm kiếm", "Thuật toán BM25"]
+    }
+  },
+  {
+    "chunk_id": "chunk_004",
+    "content": "Embedding là quá trình chuyển đổi văn bản thành vector số. Các mô hình embedding phổ biến bao gồm: Word2Vec, GloVe, BERT, BGE-M3. Embedding vector giúp máy tính hiểu được ngữ nghĩa và tìm kiếm các đoạn văn bản tương tự.",
+    "metadata": {
+      "section_code": "III.2",
+      "section_type": "muc",
+      "section_title": "Embedding Vector",
+      "tags": ["embedding", "vector", "bert", "bge"],
+      "title_path": ["Kỹ thuật tìm kiếm", "Embedding Vector"]
+    }
+  },
+  {
+    "chunk_id": "chunk_005",
+    "content": "Hybrid Search kết hợp cả dense retrieval (embedding) và sparse retrieval (BM25). Dense retrieval tốt cho semantic search, còn BM25 tốt cho exact matching. Kết hợp cả hai cho kết quả tốt nhất.",
+    "metadata": {
+      "section_code": "III.3",
+      "section_type": "muc",
+      "section_title": "Hybrid Search",
+      "tags": ["hybrid", "dense", "sparse", "search"],
+      "title_path": ["Kỹ thuật tìm kiếm", "Hybrid Search"]
+    }
+  },
+  {
+    "chunk_id": "chunk_006",
+    "content": "Reranking là bước sử dụng LLM để sắp xếp lại kết quả tìm kiếm. Sau khi BM25 và embedding retrieval trả về top 20 candidates, LLM sẽ đánh giá từng candidate và cho điểm từ 0-10. Reranking giúp tăng precision nhưng tốn thời gian hơn.",
+    "metadata": {
+      "section_code": "IV",
+      "section_type": "chuong",
+      "section_title": "LLM Reranking",
+      "tags": ["reranking", "llm", "openai"],
+      "title_path": ["LLM Reranking"]
+    }
+  },
+  {
+    "chunk_id": "chunk_007",
+    "content": "Query Expansion là kỹ thuật mở rộng câu query bằng từ đồng nghĩa. Ví dụ: 'hồ sơ' → 'giấy tờ', 'tài liệu'. Query expansion giúp tăng recall (tìm được nhiều kết quả liên quan hơn). Đối với tiếng Việt, cần dictionary từ đồng nghĩa chuyên biệt.",
+    "metadata": {
+      "section_code": "V",
+      "section_type": "chuong",
+      "section_title": "Query Expansion",
+      "tags": ["query", "expansion", "synonym"],
+      "title_path": ["Query Expansion"]
+    }
+  },
+  {
+    "chunk_id": "chunk_008",
+    "content": "Chunking là quá trình chia văn bản dài thành các đoạn nhỏ. Các chiến lược chunking: 1) Fixed-size chunking - chia theo số ký tự cố định, 2) Sentence-based chunking - chia theo câu, 3) Hierarchical chunking - chia theo cấu trúc văn bản. Hierarchical chunking cho kết quả tốt nhất với văn bản có cấu trúc.",
+    "metadata": {
+      "section_code": "VI",
+      "section_type": "chuong",
+      "section_title": "Document Chunking",
+      "tags": ["chunking", "hierarchical", "document"],
+      "title_path": ["Document Chunking"]
+    }
+  }
+]
