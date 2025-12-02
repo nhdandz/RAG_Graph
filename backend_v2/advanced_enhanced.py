@@ -42,7 +42,7 @@ app.add_middleware(
 # Configuration
 class Config:
     # Gemini API
-    GEMINI_API_KEY = "AIzaSyAAK4oe1ADsosS-T7OdXSTEgzb6qU4NQ5w"
+    GEMINI_API_KEY = "AIzaSyDprC2MR8frIRiVj7yzFKJGSfRFwDpXmVI"
     LLM_MODEL = "gemini-2.5-flash"
     EMBEDDING_MODEL = "bge-m3"
     # Feature flags
@@ -83,7 +83,7 @@ class Config:
         },
         "list": {
             "chunks": 1,
-            "max_descendants": 8,
+            "max_descendants": 40,
             "include_parents": True,
             "include_siblings": False
         },
@@ -730,11 +730,22 @@ XẾP HẠNG:"""
             generation_config=genai.GenerationConfig(
                 temperature=0.0,
                 max_output_tokens=100
-            )
+            ),
+            request_options={"timeout": 30}  # Add 30s timeout for re-ranking
         )
 
+        # Check finish_reason
+        if response.candidates:
+            finish_reason = response.candidates[0].finish_reason
+            if finish_reason != 1:  # Not STOP (normal completion)
+                print(f"⚠️ Gemini re-ranking finish_reason={finish_reason}, falling back to Ollama")
+                raise Exception(f"Gemini re-ranking failed with finish_reason={finish_reason}")
+
         # Parse ranking
-        ranking_text = response.text.strip()
+        ranking_text = response.text.strip() if response.text else ""
+        if not ranking_text:
+            raise Exception("Empty re-ranking response from Gemini")
+
         indices = [int(x.strip()) for x in ranking_text.split(',') if x.strip().isdigit()]
 
         # Reorder chunks
@@ -872,9 +883,30 @@ TRẢ LỜI
                 temperature=0.3,
                 top_p=0.9,
                 max_output_tokens=2048,
-            )
+            ),
+            request_options={"timeout": 60}  # Add 60s timeout
         )
-        return response.text
+
+        # Check finish_reason
+        if response.candidates:
+            finish_reason = response.candidates[0].finish_reason
+            # 0=FINISH_REASON_UNSPECIFIED, 1=STOP, 2=MAX_TOKENS, 3=SAFETY, 4=RECITATION, 5=OTHER
+            if finish_reason == 2:  # MAX_TOKENS
+                print("⚠️ Gemini hit max tokens limit, response may be incomplete")
+            elif finish_reason == 3:  # SAFETY
+                print("⚠️ Gemini blocked by safety filters, falling back to Ollama")
+                raise Exception("Gemini safety filter triggered")
+            elif finish_reason == 5:  # OTHER
+                print("⚠️ Gemini stopped for unknown reason, falling back to Ollama")
+                raise Exception("Gemini stopped unexpectedly")
+
+        # Try to get text
+        if response.text:
+            return response.text
+        else:
+            print("⚠️ Gemini returned empty response, falling back to Ollama")
+            raise Exception("Empty response from Gemini")
+
     except Exception as e:
         print(f"⚠️ Gemini error: {e}")
         print("🔄 Falling back to Ollama Qwen3:8b...")
