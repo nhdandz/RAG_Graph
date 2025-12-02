@@ -42,7 +42,7 @@ app.add_middleware(
 # Configuration
 class Config:
     # Gemini API
-    GEMINI_API_KEY = "AIzaSyDprC2MR8frIRiVj7yzFKJGSfRFwDpXmVI"
+    GEMINI_API_KEY = "AIzaSyCL_LztZE3dB6gHpPQQlhtO7tjezj1u5dI"
     LLM_MODEL = "gemini-2.5-flash"
     EMBEDDING_MODEL = "bge-m3"
     # Feature flags
@@ -482,6 +482,132 @@ def find_smart_descendants(
     return scored_descendants[:max_descendants]
 
 
+# ==================== LEGAL STRUCTURE FORMATTING ====================
+
+def format_legal_path(metadata: Dict) -> str:
+    """
+    Tạo path theo cấu trúc pháp luật: Chương X > Điều Y > Khoản Z
+    """
+    section_type = metadata.get('section_type', '')
+    section_code = metadata.get('section_code', '')
+    section_title = metadata.get('section_title', '')
+
+    # Map type to Vietnamese label
+    type_labels = {
+        'chuong': 'Chương',
+        'dieu': 'Điều',
+        'khoan': 'Khoản',
+        'muc': 'Mục',
+        'diem': 'Điểm',
+        'root': ''
+    }
+
+    label = type_labels.get(section_type, '')
+
+    if not label or section_type == 'root':
+        return section_title
+
+    # Extract just the numeric part from section_code
+    # e.g., "I.3.4" -> for khoan, we want "Khoản 4"
+    code_parts = section_code.split('.')
+
+    if section_type == 'chuong' and len(code_parts) >= 1:
+        return f"{label} {code_parts[0]}: {section_title}"
+    elif section_type == 'dieu' and len(code_parts) >= 2:
+        return f"{label} {code_parts[1]}: {section_title}"
+    elif section_type == 'khoan' and len(code_parts) >= 3:
+        return f"{label} {code_parts[2]}"
+    elif section_type == 'muc' and len(code_parts) >= 4:
+        return f"{label} {code_parts[3]}"
+
+    return f"{label}: {section_title}"
+
+
+def build_legal_hierarchy_path(chunk: Dict) -> str:
+    """
+    Xây dựng full path theo hierarchy pháp luật
+    Có 2 patterns:
+    - Pattern 1 (không có Mục): Chương.Điều.Khoản (I.1.2)
+    - Pattern 2 (có Mục): Chương.Mục.Điều.Khoản (III.1.8.1)
+
+    Ví dụ: "Chương VI > Mục 2 > Điều 48 > Khoản 4"
+    """
+    path_parts = []
+    current_chunk = chunk
+
+    # Traverse up to root
+    visited = set()
+    while current_chunk:
+        chunk_id = current_chunk.get('chunk_id')
+        if chunk_id in visited:
+            break
+        visited.add(chunk_id)
+
+        metadata = current_chunk.get('metadata', {})
+        section_type = metadata.get('section_type', '')
+        section_code = metadata.get('section_code', '')
+        section_title = metadata.get('section_title', '')
+
+        # Build formatted section based on type
+        type_labels = {
+            'chuong': 'Chương',
+            'muc': 'Mục',
+            'dieu': 'Điều',
+            'khoan': 'Khoản',
+            'diem': 'Điểm',
+            'item_abc': 'Điểm'
+        }
+
+        label = type_labels.get(section_type, '')
+
+        if label and section_code:
+            code_parts = section_code.split('.')
+
+            # Extract the number for this level based on section_type
+            if section_type == 'chuong':
+                path_parts.insert(0, f"Chương {code_parts[0]}")
+            elif section_type == 'muc':
+                # Mục is always second part: III.1
+                path_parts.insert(0, f"Mục {code_parts[1]}")
+            elif section_type == 'dieu':
+                # Điều can be 2nd part (I.1) or 3rd part (III.1.8)
+                # If parent has type 'muc', then Điều is 3rd part
+                # Otherwise, Điều is 2nd part
+                parent_id = metadata.get('parent_id')
+                if parent_id and parent_id in vector_store['chunk_map']:
+                    parent = vector_store['chunk_map'][parent_id]
+                    parent_type = parent.get('metadata', {}).get('section_type', '')
+                    if parent_type == 'muc':
+                        # Pattern 2: Chương.Mục.Điều
+                        if len(code_parts) >= 3:
+                            path_parts.insert(0, f"Điều {code_parts[2]}")
+                    else:
+                        # Pattern 1: Chương.Điều
+                        if len(code_parts) >= 2:
+                            path_parts.insert(0, f"Điều {code_parts[1]}")
+                else:
+                    # Fallback: use last part
+                    path_parts.insert(0, f"Điều {code_parts[-1]}")
+
+            elif section_type == 'khoan':
+                # Khoản can be 3rd part (I.2.1) or 4th part (III.1.8.1)
+                # Use the last part
+                path_parts.insert(0, f"Khoản {code_parts[-1]}")
+
+            elif section_type in ['diem', 'item_abc']:
+                # Điểm is always the last part
+                path_parts.insert(0, f"Điểm {code_parts[-1]}")
+
+        # Move to parent
+        parent_id = metadata.get('parent_id')
+        if parent_id and parent_id in vector_store['chunk_map']:
+            current_chunk = vector_store['chunk_map'][parent_id]
+        else:
+            break
+
+    return ' > '.join(path_parts) if path_parts else section_title
+
+
 # ==================== GRAPH NAVIGATION ====================
 
 def find_parent_chunks(chunk: Dict, max_levels: int = 2) -> List[Dict]:
@@ -619,9 +745,12 @@ def build_enriched_context(
     # 2. Main content
     section_title = metadata.get('section_title', 'Không rõ')
     title_path = ' > '.join(metadata.get('title_path', []))
+    legal_path = build_legal_hierarchy_path(chunk)
 
     enriched_parts.append("【 NỘI DUNG CHÍNH 】")
     enriched_parts.append(f"📌 Tiêu đề: {section_title}")
+    if legal_path:
+        enriched_parts.append(f"📜 Cấu trúc: {legal_path}")
     enriched_parts.append(f"📍 Vị trí: {title_path}")
     enriched_parts.append(f"\n{chunk['content']}")
     enriched_parts.append("")
@@ -677,14 +806,18 @@ def build_multi_chunk_context(
     for idx, chunk in enumerate(chunks):
         metadata = chunk['metadata']
         title_path = ' > '.join(metadata.get('title_path', []))
+        legal_path = build_legal_hierarchy_path(chunk)
 
         # Làm giàu từng chunk
         enriched_content = build_enriched_context(chunk, query, query_embedding, settings)
 
+        # Use legal path if available, otherwise use title path
+        display_path = legal_path if legal_path else title_path
+
         context_chunks.append(ContextChunk(
             type="primary" if idx == 0 else "secondary",
             heading=metadata.get('section_title', ''),
-            headingPath=title_path,
+            headingPath=display_path,  # Use legal path here
             content=enriched_content,
             similarity=chunk.get('similarity', 0.0),
             importance=1.0 if idx == 0 else 0.8
@@ -706,8 +839,9 @@ def rerank_with_llm(query: str, chunks: List[Dict], top_k: int = 3) -> List[Dict
     chunks_text = ""
     for i, chunk in enumerate(chunks):
         title = chunk['metadata'].get('section_title', 'Không rõ')
-        content_preview = chunk['content'][:300]
+        content_preview = chunk['content'][:150]  # Giảm từ 300 xuống 150 chars
         chunks_text += f"\n[{i}] {title}\n{content_preview}...\n"
+        # print(f"Chunk {i} preview: {content_preview[:100]}...")
 
     prompt = f"""Bạn là hệ thống đánh giá độ liên quan của tài liệu.
 
@@ -729,7 +863,7 @@ XẾP HẠNG:"""
             prompt,
             generation_config=genai.GenerationConfig(
                 temperature=0.0,
-                max_output_tokens=100
+                max_output_tokens=200  # Tăng từ 100 lên 200 để tránh MAX_TOKENS
             ),
             request_options={"timeout": 30}  # Add 30s timeout for re-ranking
         )
@@ -737,7 +871,25 @@ XẾP HẠNG:"""
         # Check finish_reason
         if response.candidates:
             finish_reason = response.candidates[0].finish_reason
-            if finish_reason != 1:  # Not STOP (normal completion)
+            # finish_reason: 1=STOP (success), 2=MAX_TOKENS, 3=SAFETY, 5=OTHER
+            if finish_reason == 2:  # MAX_TOKENS
+                print(f"⚠️ Gemini re-ranking hit MAX_TOKENS, trying to parse partial response...")
+                # Try to parse partial response if available
+                try:
+                    if response.text:
+                        ranking_text = response.text.strip()
+                        indices = [int(x.strip()) for x in ranking_text.split(',') if x.strip().isdigit()]
+                        if indices:
+                            print(f"✓ Parsed {len(indices)} indices from partial response")
+                            # Continue with partial ranking
+                        else:
+                            raise Exception("Could not parse any indices from partial response")
+                    else:
+                        raise Exception("No text in partial response")
+                except Exception as parse_error:
+                    print(f"⚠️ Failed to parse partial response: {parse_error}, falling back to Ollama")
+                    raise Exception(f"Gemini re-ranking hit MAX_TOKENS and parsing failed")
+            elif finish_reason != 1:  # Not STOP (normal completion)
                 print(f"⚠️ Gemini re-ranking finish_reason={finish_reason}, falling back to Ollama")
                 raise Exception(f"Gemini re-ranking failed with finish_reason={finish_reason}")
 
@@ -818,7 +970,7 @@ def generate_answer(query: str, context_chunks: List[ContextChunk], intent: str)
 ═══════════════════════════════════════
 TÀI LIỆU {i}/{len(context_chunks)}
 ═══════════════════════════════════════
-📍 Đường dẫn: {chunk.headingPath}
+📜 Cấu trúc pháp luật: {chunk.headingPath}
 ⭐ Độ liên quan: {chunk.similarity:.2%}
 🎯 Loại: {chunk.type}
 
@@ -842,10 +994,11 @@ TÀI LIỆU {i}/{len(context_chunks)}
 
 NHIỆM VỤ:
 1. {instruction}
-2. Trích dẫn rõ ràng điều khoản, khoản, mục liên quan
+2. Trích dẫn CHÍNH XÁC theo cấu trúc pháp luật (Chương X, Điều Y, Khoản Z)
 3. Giải thích dễ hiểu, chuyên nghiệp bằng tiếng Việt
 
 HƯỚNG DẪN:
+- Mỗi tài liệu đã có "Cấu trúc pháp luật" cho biết vị trí chính xác (Chương, Điều, Khoản)
 - Tài liệu đã được làm giàu với:
   • Ngữ cảnh tổng quát (phần cha)
   • Nội dung chính (phần liên quan nhất)
@@ -854,7 +1007,9 @@ HƯỚNG DẪN:
 
 - Sử dụng thông tin từ TẤT CẢ tài liệu được cung cấp
 - Nếu không đủ thông tin, nói rõ "Thông tin này không có trong tài liệu"
-- Trích dẫn: "Theo Điều X, Khoản Y..."
+- TRÍCH DẪN: Dựa vào "Cấu trúc pháp luật" để trích dẫn chính xác
+  Ví dụ: "Theo Chương II, Điều 6, Khoản 1..."
+  Ví dụ: "Căn cứ Điều 3, Khoản 4..."
 
 ════════════════════════════════════════════════════════════════
 TÀI LIỆU THAM KHẢO
@@ -1111,6 +1266,10 @@ async def query_documents(request: QueryRequest):
         if config.USE_RERANKING and len(all_candidates) > settings['chunks']:
             all_candidates = rerank_with_llm(request.query, all_candidates, settings['chunks'] * 2)
             print(f"🎯 Stage 3 - After Re-ranking: {len(all_candidates)} chunks")
+            print(f"   Top chunks after re-ranking:")
+            for i, chunk in enumerate(all_candidates[:settings['chunks']]):
+                title = chunk['metadata'].get('section_title', 'Không rõ')
+                print(f"   [{i+1}] {title} (similarity: {chunk['similarity']:.2%})")
 
         # Step 7: Multi-chunk Smart Merging
         num_chunks = settings['chunks']
@@ -1143,12 +1302,17 @@ async def query_documents(request: QueryRequest):
         retrieved_docs = []
         for chunk in final_chunks:
             metadata = chunk['metadata']
+            legal_path = build_legal_hierarchy_path(chunk)
+
             retrieved_docs.append({
                 "filename": "Thông tư tuyển sinh",
                 "content": chunk['content'],
                 "similarity": chunk['similarity'],
                 "section_code": metadata.get('section_code', ''),
-                "section_title": metadata.get('section_title', '')
+                "section_title": metadata.get('section_title', ''),
+                "section_type": metadata.get('section_type', ''),
+                "legal_path": legal_path,  # Add legal hierarchy path
+                "title_path": ' > '.join(metadata.get('title_path', []))
             })
 
         response_data = {
