@@ -1,0 +1,157 @@
+{
+  "logos": [
+    {
+      "id": "hvktqs",
+      "name": "Học viện Kỹ thuật quân sự",
+      "imageUrl": "/static/logos/mta.png",
+      "websiteUrl": "http://mta.edu.vn",
+      "order": 1,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "hvqy",
+      "name": "Học viện Quân y",
+      "imageUrl": "/static/logos/hocvienquany.webp",
+      "websiteUrl": "http://vmmu.edu.vn",
+      "order": 2,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "hvkhqs",
+      "name": "Học viện Khoa học quân sự",
+      "imageUrl": "/static/logos/hocvienkhqs.jpg",
+      "websiteUrl": "http://hvkhqs.edu.vn",
+      "order": 3,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "hvpkkq",
+      "name": "Học viện Phòng không - Không quân",
+      "imageUrl": "/static/logos/hocvienpkkq.webp",
+      "websiteUrl": "http://hvpkkq.edu.vn",
+      "order": 4,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "hvhq",
+      "name": "Học viện Hải quân",
+      "imageUrl": "/static/logos/hocvienhaiquan.jpg",
+      "websiteUrl": "http://nava.edu.vn",
+      "order": 5,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "hvbp",
+      "name": "Học viện Biên phòng",
+      "imageUrl": "/static/logos/hocvienbienphong.jpg",
+      "websiteUrl": "http://hvbp.edu.vn",
+      "order": 6,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "hvhk",
+      "name": "Học viện Hậu cần",
+      "imageUrl": "/static/logos/hvhk.jpg",
+      "websiteUrl": "http://hocvienhaucan.edu.vn",
+      "order": 7,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "sqlq1",
+      "name": "Trường Sĩ quan Lục quân 1",
+      "imageUrl": "/static/logos/hvlq.jpg",
+      "websiteUrl": "http://sqlq1.edu.vn",
+      "order": 8,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "sqlq2",
+      "name": "Trường Sĩ quan Lục quân 2",
+      "imageUrl": "/static/logos/hvlq2.jpg",
+      "websiteUrl": "http://sqlq2.edu.vn",
+      "order": 9,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "sqct",
+      "name": "Trường Sĩ quan Chính trị",
+      "imageUrl": "/static/logos/truongsiquanchinhtri.jpg",
+      "websiteUrl": "http://sqct.edu.vn",
+      "order": 10,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "sqcb",
+      "name": "Trường Sĩ quan Công binh",
+      "imageUrl": "/static/logos/truongsiquancongbinh.webp",
+      "websiteUrl": "http://sqcongbinh.edu.vn",
+      "order": 11,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "sqtt",
+      "name": "Trường Sĩ quan Thông tin",
+      "imageUrl": "/static/logos/truongsiquanthongtin.jpg",
+      "websiteUrl": "http://sqthongtin.edu.vn",
+      "order": 12,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "sqpb",
+      "name": "Trường Sĩ quan Pháo binh",
+      "imageUrl": "/static/logos/truongsiquanphaobinh.jpg",
+      "websiteUrl": "http://sqpb.edu.vn",
+      "order": 13,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "sqkq",
+      "name": "Trường Sĩ quan Không quân",
+      "imageUrl": "/static/logos/truongsiquankhongquan.png",
+      "websiteUrl": "http://sqkq.edu.vn",
+      "order": 14,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "sqttg",
+      "name": "Trường Sĩ quan Tăng Thiết giáp",
+      "imageUrl": "/static/logos/truongsiquantangthietgiap.png",
+      "websiteUrl": "http://sqtang.edu.vn",
+      "order": 15,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "sqdc",
+      "name": "Trường Sĩ quan Đặc công",
+      "imageUrl": "/static/logos/truongsiquandaccong.png",
+      "websiteUrl": "http://sqdacong.edu.vn",
+      "order": 16,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    },
+    {
+      "id": "sqph",
+      "name": "Trường Sĩ quan Phòng hóa",
+      "imageUrl": "/static/logos/truongsiquanphonghoa.png",
+      "websiteUrl": "http://sqphonghoa.edu.vn",
+      "order": 17,
+      "active": true,
+      "createdAt": "2025-01-01T00:00:00Z"
+    }
+  ]
+}

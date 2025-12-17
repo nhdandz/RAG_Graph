@@ -168,13 +168,13 @@ class AdmissionDocumentChunker:
                 'full_text': text
             }
 
-        # Pattern cho các ý a), b), c)
-        abc_pattern = r'^([a-z])\)\s+(.+)$'
-        match = re.match(abc_pattern, text)
+        # Pattern cho các ý a), b), c), đ) (bao gồm cả chữ Việt và in hoa)
+        abc_pattern = r'^([a-zđ])\)\s+(.+)$'
+        match = re.match(abc_pattern, text, re.IGNORECASE)
         if match:
             return {
                 'type': 'item_abc',
-                'number': match.group(1),
+                'number': match.group(1).lower(),  # Chuẩn hóa về chữ thường
                 'title': '',
                 'full_text': text
             }

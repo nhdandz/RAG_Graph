@@ -1,0 +1,2191 @@
+"""
+Advanced RAG API với tất cả tính năng tối ưu:
+- Query Intent Analysis & Routing
+- Smart Descendants Selection (score-based)
+- Multi-chunk with Smart Merging
+- Adaptive Context Window
+- Re-ranking with LLM
+- Semantic Caching
+- Query Expansion/Rewriting
+"""
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from typing import List, Dict, Optional, Any, Set, Tuple
+import numpy as np
+import google.generativeai as genai
+import ollama
+from sklearn.metrics.pairwise import cosine_similarity
+import json
+import re
+import math
+from collections import Counter
+from pathlib import Path
+import os
+import hashlib
+from datetime import datetime, timedelta
+
+# Cross-Encoder for reranking
+try:
+    from sentence_transformers import CrossEncoder
+    CROSS_ENCODER_AVAILABLE = True
+except ImportError:
+    CROSS_ENCODER_AVAILABLE = False
+    print("⚠️ sentence-transformers not installed. Cross-Encoder reranking will be disabled.")
+    print("   Install with: pip install sentence-transformers")
+
+
+app = FastAPI(title="Advanced RAG API")
+
+# Mount static files directory for logos
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:3002"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# Configuration
+class Config:
+    # Gemini API
+    GEMINI_API_KEY = "AIzaSyBM2d63oq4whZNtQMxrCUd1KDtVItsSALA"
+    LLM_MODEL = "gemini-2.5-flash"
+    EMBEDDING_MODEL = "bge-m3"
+    # Feature flags
+    USE_HYBRID_SEARCH = True
+    USE_GRAPH_ENRICHMENT = True
+    USE_DEDUPLICATION = True
+    USE_QUERY_ANALYSIS = True
+    USE_RERANKING = True
+    USE_SEMANTIC_CACHE = True
+    USE_QUERY_EXPANSION = True
+    USE_CROSS_ENCODER = True  # NEW: Use Cross-Encoder for reranking
+    RERANKER_ENSEMBLE = True  # NEW: Use hybrid ensemble (CE + Retrieval + Metadata)
+
+    # Parameters
+    DEDUP_THRESHOLD = 0.95  # Tăng từ 0.85 lên 0.95 để giữ lại nhiều chunks liên quan hơn
+    BM25_K1 = 1.5
+    BM25_B = 0.75
+    RRF_K = 60
+
+    # Cross-Encoder settings
+    CROSS_ENCODER_MODEL = "BAAI/bge-reranker-v2-m3"  # Multilingual, good for Vietnamese
+
+    # Advanced settings
+    MAX_CHUNKS_MULTI = 3  # Số chunks tối đa trong multi-chunk mode
+    MAX_SMART_DESCENDANTS = 5  # Số descendants tối đa (score-based)
+    MIN_DESCENDANT_SCORE = 0.3  # Score tối thiểu để giữ descendant
+    MAX_SMART_SIBLINGS = 3  # Số siblings tối đa (score-based)
+    MIN_SIBLING_SCORE = 0.4  # Score tối thiểu để giữ sibling
+    CACHE_SIMILARITY_THRESHOLD = 0.92  # Threshold cho semantic cache
+    CACHE_TTL_HOURS = 24  # Cache time-to-live
+
+    # Embedding enrichment settings (NEW)
+    USE_ENRICHED_EMBEDDINGS = True  # Include parent context in embeddings
+    PARENT_CONTEXT_LENGTH = 200  # Max chars from parent content
+    TITLE_PATH_LEVELS = 3  # Number of title path levels to include
+
+    # Adaptive context settings by intent
+    CONTEXT_SETTINGS = {
+        "specific": {
+            "chunks": 2,
+            "max_descendants": 5,
+            "max_siblings": 2,
+            "include_parents": True
+        },
+        "comparison": {
+            "chunks": 2,
+            "max_descendants": 2,
+            "max_siblings": 3,
+            "include_parents": True
+        },
+        "list": {
+            "chunks": 2,
+            "max_descendants": 40,
+            "max_siblings": 5,
+            "include_parents": True
+        },
+        "explanation": {
+            "chunks": 3,
+            "max_descendants": 4,
+            "max_siblings": 3,
+            "include_parents": True
+        },
+        "general": {
+            "chunks": 3,
+            "max_descendants": 5,
+            "max_siblings": 2,
+            "include_parents": True
+        }
+    }
+
+config = Config()
+
+# Configure Gemini API
+genai.configure(api_key=config.GEMINI_API_KEY)
+
+
+# In-memory storage
+vector_store = {
+    "chunks": [],
+    "embeddings": [],
+    "chunk_map": {},
+    "semantic_cache": []  # List of {query_embedding, query_text, response, timestamp}
+}
+
+
+# Pydantic Models
+class QueryRequest(BaseModel):
+    query: str
+    topK: int = 10
+
+
+class ContextChunk(BaseModel):
+    type: str
+    heading: str
+    headingPath: str
+    content: str
+    similarity: Optional[float] = None
+    importance: Optional[float] = None
+    relatedTo: Optional[str] = None
+    relationshipType: Optional[str] = None
+
+
+class QueryResponse(BaseModel):
+    answer: str
+    retrievedDocuments: List[Dict[str, Any]]
+    contextStructure: Dict[str, Any]
+    metadata: Optional[Dict[str, Any]] = None  # Thêm metadata về query analysis
+
+
+# ==================== QUERY INTENT ANALYSIS ====================
+
+class QueryAnalyzer:
+    """Phân tích intent của câu hỏi"""
+
+    INTENT_PATTERNS = {
+        "specific": [
+            r"(thời hạn|deadline|bao lâu|khi nào|ngày nào|thời gian)",
+            r"(điều kiện|yêu cầu|quy định|tiêu chuẩn) (gì|nào|là gì)",
+            r"(có cần|phải|bắt buộc|yêu cầu).*không",
+            r"(địa chỉ|nơi|ở đâu|liên hệ)",
+            r"(số lượng|bao nhiêu|mấy)"
+        ],
+        "comparison": [
+            r"(khác nhau|khác biệt|so sánh|giống nhau)",
+            r"(.*) và (.*) (khác|giống)",
+            r"(chọn|lựa chọn).*(hay|hoặc)"
+        ],
+        "list": [
+            r"(có những|bao gồm|gồm có|liệt kê|danh sách)",
+            r"(các|những) (.*) (nào|gì)",
+            r"(tất cả|toàn bộ|đầy đủ)"
+        ],
+        "explanation": [
+            r"(tại sao|vì sao|lý do|nguyên nhân)",
+            r"(như thế nào|thế nào|cách nào|làm sao)",
+            r"(giải thích|giải|mô tả|nói rõ)",
+            r"(ý nghĩa|nghĩa là gì|có nghĩa)"
+        ]
+    }
+
+    @staticmethod
+    def analyze(query: str) -> Dict[str, Any]:
+        """
+        Phân tích query và trả về intent + confidence
+        """
+        query_lower = query.lower()
+        scores = {}
+
+        for intent, patterns in QueryAnalyzer.INTENT_PATTERNS.items():
+            score = 0
+            matched_patterns = []
+
+            for pattern in patterns:
+                if re.search(pattern, query_lower):
+                    score += 1
+                    matched_patterns.append(pattern)
+
+            scores[intent] = {
+                "score": score,
+                "patterns": matched_patterns
+            }
+
+        # Tìm intent có score cao nhất
+        if scores:
+            best_intent = max(scores.items(), key=lambda x: x[1]["score"])
+            if best_intent[1]["score"] > 0:
+                return {
+                    "intent": best_intent[0],
+                    "confidence": min(best_intent[1]["score"] / 2, 1.0),
+                    "matched_patterns": best_intent[1]["patterns"]
+                }
+
+        return {
+            "intent": "general",
+            "confidence": 0.5,
+            "matched_patterns": []
+        }
+
+
+# ==================== QUERY EXPANSION ====================
+
+# Import synonyms from config file for easy maintenance
+try:
+    from query_config import QUERY_SYNONYMS
+except ImportError:
+    # Fallback if config file not found
+    QUERY_SYNONYMS = {
+        'học viện': ['trường'],
+        'thi vào': ['tuyển sinh', 'dự tuyển', 'xét tuyển']
+    }
+    print("⚠️ query_config.py not found, using default synonyms")
+
+
+class QueryExpander:
+    """
+    Query expansion với từ đồng nghĩa.
+    Synonyms được load từ query_config.py để dễ maintain.
+    """
+
+    SYNONYMS = QUERY_SYNONYMS  # Load from config file
+
+    @staticmethod
+    def expand(query: str, intent: str) -> List[str]:
+        """
+        Tạo các biến thể của query với:
+        - Synonym expansion
+        - Intent-based expansion
+
+        LƯU Ý: Không còn cần school mapping nữa vì đã có Sibling Enrichment!
+        Hệ thống sẽ tự động tìm TẤT CẢ các chunks liên quan (Điểm a, b, c...)
+        và LLM sẽ chọn đúng chunk dựa trên parent context.
+        """
+        variations = [query]
+        query_lower = query.lower()
+
+        # 1. Synonym expansion - Thêm từ đồng nghĩa
+        for term, synonyms in QueryExpander.SYNONYMS.items():
+            if term in query_lower:
+                for synonym in synonyms[:1]:  # Chỉ lấy 1 synonym để tránh quá nhiều
+                    expanded = query_lower.replace(term, synonym)
+                    if expanded not in variations:
+                        variations.append(expanded)
+
+        # 2. Intent-based expansion
+        if intent == "specific":
+            # Thêm các từ như "quy định", "tiêu chuẩn"
+            if "thời hạn" in query_lower:
+                variations.append(f"{query} quy định")
+                variations.append(f"thời gian {query}")
+            elif any(word in query_lower for word in ['có thể', 'được không', 'có được']):
+                variations.append(f"tiêu chuẩn {query}")
+                variations.append(f"quy định {query}")
+
+        elif intent == "list":
+            variations.append(f"{query} bao gồm")
+            variations.append(f"danh sách {query}")
+
+        elif intent == "explanation":
+            variations.append(f"giải thích {query}")
+            variations.append(f"{query} như thế nào")
+
+        # Deduplicate và giới hạn
+        variations = list(dict.fromkeys(variations))  # Remove duplicates, preserve order
+        return variations[:3]  # Giảm về 3 variations (đủ rồi)
+
+
+# ==================== CROSS-ENCODER RERANKING ====================
+
+class HybridReranker:
+    """
+    Hybrid reranking kết hợp:
+    - Cross-Encoder (chính) - 70%
+    - Retrieval scores (phụ) - 20%
+    - Metadata signals (phụ) - 10%
+    """
+
+    def __init__(self, model_name='BAAI/bge-reranker-v2-m3'):
+        """
+        Initialize Cross-Encoder model
+        Models khuyên dùng:
+        - BAAI/bge-reranker-v2-m3 (multilingual, tốt cho tiếng Việt)
+        - BAAI/bge-reranker-large (English, chính xác nhất)
+        - cross-encoder/ms-marco-MiniLM-L-6-v2 (nhanh)  
+        """
+        if not CROSS_ENCODER_AVAILABLE:
+            print("⚠️ Cross-Encoder not available. Reranking will use fallback method.")
+            self.model = None
+            return
+
+        try:
+            print(f"📦 Loading Cross-Encoder model: {model_name}")
+            self.model = CrossEncoder(model_name)
+            print("✅ Cross-Encoder loaded successfully")
+        except Exception as e:
+            print(f"❌ Failed to load Cross-Encoder: {e}")
+            self.model = None
+
+        # Weights cho ensemble - ĐIỀU CHỈNH: Cân bằng hơn giữa các signals
+        self.weights = {
+            'cross_encoder': 0.55,   # 55% từ cross-encoder (GIẢM từ 70%)
+            'retrieval': 0.35,       # 35% từ retrieval score (TĂNG từ 20%)
+            'metadata': 0.10         # 10% từ metadata signals (giữ nguyên)
+        }
+
+    def calculate_metadata_score(self, chunk: Dict, query: str) -> float:
+        """
+        Tính điểm dựa trên metadata:
+        - Section type priority (ưu tiên chunks cụ thể hơn)
+        - Title matching (với weight cao hơn)
+        - Content length
+        - Specificity bonus (bonus cho content có từ khóa cụ thể)
+        """
+        meta = chunk['metadata']
+        score = 0.0
+
+        # 1. Section type priority - ĐIỀU CHỈNH: Ưu tiên chunks cụ thể
+        section_type = meta.get('section_type', '')
+        section_title = meta.get('section_title', '').lower()
+        content = chunk.get('content', '').lower()
+
+        type_scores = {
+            'dieu': 0.8,      # Điều - quan trọng nhưng thường quá chung
+            'khoan': 0.7,     # Khoản
+            'muc': 0.6,       # Mục
+            'chuong': 0.3,    # Chương - quá tổng quát, GIẢM từ 0.6
+            'diem': 0.9       # Điểm - cụ thể nhất, TĂNG từ 0.5
+        }
+        base_score = type_scores.get(section_type, 0.5)
+
+        score += base_score * 0.3  # GIẢM weight từ 0.4 xuống 0.3
+
+        # 2. Title matching với query - TĂNG WEIGHT
+        title = meta.get('section_title', '').lower()
+        query_lower = query.lower()
+        query_terms = set(query_lower.split())
+        title_terms = set(title.split())
+
+        if query_terms & title_terms:
+            overlap = len(query_terms & title_terms) / len(query_terms) if query_terms else 0
+            score += overlap * 0.4  # TĂNG từ 0.3 lên 0.4
+
+        # 3. Content length (không quá ngắn, không quá dài)
+        word_count = meta.get('word_count', 0)
+        if 50 <= word_count <= 500:
+            score += 0.1  # GIẢM từ 0.3 xuống 0.1
+        elif 20 <= word_count < 50 or 500 < word_count <= 1000:
+            score += 0.05  # GIẢM từ 0.2 xuống 0.05
+        else:
+            score += 0.0   # GIẢM từ 0.1 xuống 0.0
+
+        return min(score, 1.0)
+
+    def rerank(
+        self,
+        query: str,
+        chunks: List[Dict],
+        top_k: int = 3,
+        use_ensemble: bool = True
+    ) -> List[Dict]:
+        """
+        Re-rank chunks với hybrid approach
+
+        Args:
+            query: User query
+            chunks: List of chunks with 'content', 'metadata', 'similarity'
+            top_k: Number of top results to return
+            use_ensemble: If True, combine multiple signals
+        """
+        if len(chunks) <= top_k:
+            return chunks
+
+        if not self.model:
+            print("⚠️ Cross-Encoder not available, using retrieval scores only")
+            chunks_sorted = sorted(chunks, key=lambda x: x.get('similarity', 0), reverse=True)
+            return chunks_sorted[:top_k]
+
+        print(f"\n🎯 Hybrid Reranking: {len(chunks)} candidates -> top {top_k}")
+
+        # 1. Prepare pairs cho cross-encoder
+        pairs = []
+        for chunk in chunks:
+            meta = chunk['metadata']
+
+            # Tạo rich document representation
+            legal_path = build_legal_hierarchy_path(chunk)
+            title = meta.get('section_title', '')
+
+            # MỚI: Thêm parent context để Cross-Encoder hiểu rõ hơn về ngữ cảnh
+            parent_context = ""
+            parent_id = meta.get('parent_id')
+            if parent_id and parent_id in vector_store['chunk_map']:
+                parent_chunk = vector_store['chunk_map'][parent_id]
+                parent_title = parent_chunk['metadata'].get('section_title', '')
+                parent_content = parent_chunk['content'][:200]  # Lấy 200 chars từ parent
+                parent_context = f"[NGỮ CẢNH: {parent_title}. {parent_content}] "
+
+            # Combine parent context + title + legal path + content
+            doc_text = f"{parent_context}{title}. {legal_path}. {chunk['content'][:600]}"
+            pairs.append([query, doc_text])
+
+        # 2. Score với cross-encoder
+        print("   📊 Cross-encoder scoring...")
+        try:
+            cross_encoder_scores = self.model.predict(pairs, show_progress_bar=False)
+        except Exception as e:
+            print(f"   ❌ Cross-encoder failed: {e}, using retrieval scores only")
+            chunks_sorted = sorted(chunks, key=lambda x: x.get('similarity', 0), reverse=True)
+            return chunks_sorted[:top_k]
+
+        if not use_ensemble:
+            # Chỉ dùng cross-encoder
+            scored = list(zip(chunks, cross_encoder_scores))
+            scored.sort(key=lambda x: x[1], reverse=True)
+
+            reranked = []
+            for chunk, score in scored[:top_k]:
+                chunk['rerank_score'] = float(score)
+                chunk['rerank_method'] = 'cross_encoder_only'
+                reranked.append(chunk)
+
+            return reranked
+
+        # 3. Ensemble scoring
+        print("   🔄 Ensemble scoring (CE + Retrieval + Metadata)...")
+        final_scores = []
+
+        for i, chunk in enumerate(chunks):
+            # a. Cross-encoder score (normalized to 0-1)
+            ce_score = float(cross_encoder_scores[i])
+            # Normalize từ [-10, 10] -> [0, 1] (typical range for cross-encoder)
+            ce_score_norm = (ce_score + 10) / 20
+            ce_score_norm = max(0, min(1, ce_score_norm))
+
+            # b. Retrieval score (already 0-1)
+            retrieval_score = chunk.get('similarity', 0.0)
+
+            # c. Metadata score
+            metadata_score = self.calculate_metadata_score(chunk, query)
+
+            # d. Weighted combination
+            final_score = (
+                self.weights['cross_encoder'] * ce_score_norm +
+                self.weights['retrieval'] * retrieval_score +
+                self.weights['metadata'] * metadata_score
+            )
+
+            final_scores.append({
+                'chunk': chunk,
+                'final_score': final_score,
+                'ce_score': ce_score,
+                'retrieval_score': retrieval_score,
+                'metadata_score': metadata_score
+            })
+
+        # 4. Sort by final score
+        final_scores.sort(key=lambda x: x['final_score'], reverse=True)
+
+        # 5. Prepare output
+        reranked = []
+        print("   📋 Top results:")
+        for i, item in enumerate(final_scores[:top_k]):
+            chunk = item['chunk']
+            chunk['rerank_score'] = item['final_score']
+            chunk['rerank_details'] = {
+                'cross_encoder': item['ce_score'],
+                'retrieval': item['retrieval_score'],
+                'metadata': item['metadata_score']
+            }
+            chunk['rerank_method'] = 'hybrid_ensemble'
+            reranked.append(chunk)
+
+            # Debug info
+            title = chunk['metadata'].get('section_title', 'N/A')
+            print(f"      [{i+1}] {title:40s} | Final: {item['final_score']:.3f} "
+                  f"(CE:{item['ce_score']:.2f}, R:{item['retrieval_score']:.2f}, M:{item['metadata_score']:.2f})")
+
+        return reranked
+
+
+# ==================== SEMANTIC CACHE ====================
+
+class SemanticCache:
+    """Cache các câu hỏi tương tự"""
+
+    @staticmethod
+    def get_cache_key(query: str) -> str:
+        """Tạo cache key từ query"""
+        return hashlib.md5(query.lower().encode()).hexdigest()
+
+    @staticmethod
+    def lookup(query_embedding: np.ndarray, threshold: float = 0.92) -> Optional[Dict]:
+        """
+        Tìm câu hỏi tương tự trong cache
+        """
+        if not vector_store['semantic_cache']:
+            return None
+
+        current_time = datetime.now()
+
+        for cache_entry in vector_store['semantic_cache']:
+            # Check TTL
+            if (current_time - cache_entry['timestamp']) > timedelta(hours=config.CACHE_TTL_HOURS):
+                continue
+
+            # Check similarity
+            cached_embedding = cache_entry['query_embedding']
+            similarity = cosine_similarity(
+                query_embedding.reshape(1, -1),
+                cached_embedding.reshape(1, -1)
+            )[0][0]
+
+            if similarity >= threshold:
+                return {
+                    "response": cache_entry['response'],
+                    "similarity": float(similarity),
+                    "original_query": cache_entry['query_text']
+                }
+
+        return None
+
+    @staticmethod
+    def add(query_text: str, query_embedding: np.ndarray, response: Dict):
+        """Thêm vào cache"""
+        vector_store['semantic_cache'].append({
+            "query_text": query_text,
+            "query_embedding": query_embedding,
+            "response": response,
+            "timestamp": datetime.now()
+        })
+
+        # Giới hạn cache size
+        if len(vector_store['semantic_cache']) > 100:
+            vector_store['semantic_cache'] = vector_store['semantic_cache'][-100:]
+
+
+# ==================== BM25 Implementation ====================
+
+# Vietnamese stopwords for better BM25 tokenization
+VIETNAMESE_STOPWORDS = {
+    'và', 'của', 'có', 'được', 'là', 'trong', 'các', 'với', 'để', 'cho',
+    'theo', 'về', 'đến', 'từ', 'như', 'bởi', 'này', 'đó', 'khi', 'nếu',
+    'sau', 'trước', 'đã', 'sẽ', 'không', 'người', 'một', 'những', 'do',
+    'còn', 'nhưng', 'đang', 'bị', 'nên', 'ra', 'thì', 'cũng', 'mà', 'vào',
+    'lại', 'hay', 'hơn', 'nữa', 'rằng', 'vì', 'đều', 'phải', 'hoặc'
+}
+
+class BM25:
+    """BM25 sparse retrieval với Vietnamese stopwords"""
+
+    @staticmethod
+    def tokenize(text: str) -> List[str]:
+        if not text:
+            return []
+        cleaned = re.sub(r'[^\w\s]', ' ', text.lower())
+        # Remove stopwords và giữ các từ > 1 ký tự
+        tokens = [word for word in cleaned.split()
+                  if len(word) > 1 and word not in VIETNAMESE_STOPWORDS]
+        return tokens
+
+    @staticmethod
+    def calculate_idf(query_terms: List[str], documents: List[str]) -> Dict[str, float]:
+        idf_scores = {}
+        total_docs = len(documents)
+
+        for term in query_terms:
+            docs_with_term = sum(1 for doc in documents if term in BM25.tokenize(doc))
+            idf = math.log((total_docs - docs_with_term + 0.5) / (docs_with_term + 0.5) + 1.0)
+            idf_scores[term] = idf
+
+        return idf_scores
+
+    @staticmethod
+    def calculate_bm25_scores(query: str, documents: List[str], k1: float = 1.5, b: float = 0.75) -> List[float]:
+        query_terms = BM25.tokenize(query)
+        if not query_terms:
+            return [0.0] * len(documents)
+
+        doc_lengths = [len(BM25.tokenize(doc)) for doc in documents]
+        avg_doc_length = sum(doc_lengths) / len(documents) if documents else 0
+
+        idf_scores = BM25.calculate_idf(query_terms, documents)
+
+        scores = []
+        for doc, doc_len in zip(documents, doc_lengths):
+            doc_terms = BM25.tokenize(doc)
+            term_freq = Counter(doc_terms)
+
+            score = 0.0
+            for term in query_terms:
+                if term in term_freq:
+                    tf = term_freq[term]
+                    idf = idf_scores[term]
+                    numerator = tf * (k1 + 1)
+                    denominator = tf + k1 * (1 - b + b * doc_len / avg_doc_length)
+                    score += idf * (numerator / denominator)
+
+            scores.append(score)
+
+        return scores
+
+
+def reciprocal_rank_fusion(dense_scores: List[float], sparse_scores: List[float], k: int = 60) -> List[float]:
+    """Reciprocal Rank Fusion"""
+    dense_ranks = np.argsort(dense_scores)[::-1]
+    sparse_ranks = np.argsort(sparse_scores)[::-1]
+
+    dense_rank_map = {idx: rank for rank, idx in enumerate(dense_ranks)}
+    sparse_rank_map = {idx: rank for rank, idx in enumerate(sparse_ranks)}
+
+    rrf_scores = []
+    for i in range(len(dense_scores)):
+        dense_rank = dense_rank_map.get(i, len(dense_scores))
+        sparse_rank = sparse_rank_map.get(i, len(sparse_scores))
+        rrf_score = (1.0 / (k + dense_rank)) + (1.0 / (k + sparse_rank))
+        rrf_scores.append(rrf_score)
+
+    return rrf_scores
+
+
+def deduplicate_chunks(chunks: List[Dict], threshold: float = 0.85) -> List[Dict]:
+    """Remove duplicate chunks"""
+    unique_chunks = []
+
+    for chunk in chunks:
+        is_duplicate = False
+        chunk_words = set(chunk['content'].lower().split())
+
+        for unique_chunk in unique_chunks:
+            unique_words = set(unique_chunk['content'].lower().split())
+
+            intersection = chunk_words & unique_words
+            union = chunk_words | unique_words
+
+            if union:
+                jaccard = len(intersection) / len(union)
+                if jaccard > threshold:
+                    is_duplicate = True
+                    break
+
+        if not is_duplicate:
+            unique_chunks.append(chunk)
+
+    return unique_chunks
+
+
+def get_embedding(text: str) -> np.ndarray:
+    """Get embedding from Ollama BGE-M3"""
+    try:
+        response = ollama.embed(model=config.EMBEDDING_MODEL, input=text)
+        return np.array(response['embeddings'][0])
+    except Exception as e:
+        print(f"Embedding error: {e}")
+        raise HTTPException(status_code=500, detail=f"Embedding error: {str(e)}")
+
+
+def build_enriched_text_for_embedding(chunk_data: Dict, vector_store: Dict) -> str:
+    """
+    Build enriched text including parent context for embedding generation.
+
+    This ensures hierarchical context (like "Học viện Hậu cần") is included
+    in the embedding space, even if it only appears in parent content.
+
+    Example output:
+        "[NGỮ CẢNH: Đối với các trường đào tạo sĩ quan chỉ huy, chính trị, hậu cần,
+         gồm các học viện: Hậu cần...]
+         [VỊ TRÍ: TUYỂN SINH ĐÀO TẠO CÁN BỘ > Tiêu chuẩn về sức khỏe > Một số tiêu chuẩn riêng]
+         - Về Mắt: Không tuyển thí sinh mắc tật khúc xạ cận thị."
+
+    Args:
+        chunk_data: Chunk dictionary with 'content' and 'metadata'
+        vector_store: Vector store containing chunk_map with parent chunks
+
+    Returns:
+        Enriched text combining parent context + title path + main content
+    """
+    if not config.USE_ENRICHED_EMBEDDINGS:
+        # If enrichment disabled, return original content
+        return chunk_data.get('content', '').strip()
+
+    metadata = chunk_data.get('metadata', {})
+    content = chunk_data.get('content', '').strip()
+    enriched_parts = []
+
+    # 1. Add parent context (if exists)
+    parent_id = metadata.get('parent_id')
+    if parent_id and parent_id in vector_store['chunk_map']:
+        parent_chunk = vector_store['chunk_map'][parent_id]
+        parent_content = parent_chunk.get('content', '')[:config.PARENT_CONTEXT_LENGTH]
+        parent_title = parent_chunk.get('metadata', {}).get('section_title', '')
+
+        if parent_title:
+            enriched_parts.append(f"[NGỮ CẢNH: {parent_title}]")
+        if parent_content:
+            enriched_parts.append(parent_content)
+
+    # 2. Add title path (last N levels for hierarchical breadcrumb)
+    title_path = metadata.get('title_path', [])
+    if title_path and len(title_path) > 1:  # Skip if only root
+        # Take last N levels to avoid too long text
+        path_str = ' > '.join(title_path[-config.TITLE_PATH_LEVELS:])
+        enriched_parts.append(f"[VỊ TRÍ: {path_str}]")
+
+    # 3. Add main content
+    enriched_parts.append(content)
+
+    return ' '.join(enriched_parts)
+
+
+# ==================== SMART DESCENDANTS SELECTION ====================
+
+def score_descendant_relevance(descendant: Dict, query: str, query_embedding: np.ndarray) -> float:
+    """
+    Tính điểm liên quan của descendant với query
+    Kết hợp: semantic similarity + keyword matching
+    """
+    # Semantic similarity
+    desc_embedding = get_embedding(descendant['content'])
+    semantic_score = cosine_similarity(
+        query_embedding.reshape(1, -1),
+        desc_embedding.reshape(1, -1)
+    )[0][0]
+
+    # Keyword matching (BM25-like)
+    query_terms = BM25.tokenize(query)
+    desc_terms = BM25.tokenize(descendant['content'])
+
+    if not query_terms or not desc_terms:
+        keyword_score = 0.0
+    else:
+        matched = len(set(query_terms) & set(desc_terms))
+        keyword_score = matched / len(query_terms)
+
+    # Combine (70% semantic, 30% keyword)
+    final_score = 0.7 * semantic_score + 0.3 * keyword_score
+
+    return final_score
+
+
+def find_smart_descendants(
+    chunk: Dict,
+    query: str,
+    query_embedding: np.ndarray,
+    max_descendants: int = 5,
+    min_score: float = 0.3
+) -> List[Tuple[Dict, float]]:
+    """
+    Tìm descendants có score cao nhất (thay vì lấy tất cả)
+    Trả về: List of (descendant, score)
+    """
+    all_descendants = []
+    visited = set()
+
+    def collect_descendants(current_chunk: Dict):
+        children_ids = current_chunk.get('metadata', {}).get('children_ids', [])
+
+        for child_id in children_ids:
+            if child_id in visited or child_id not in vector_store['chunk_map']:
+                continue
+
+            visited.add(child_id)
+            child_chunk = vector_store['chunk_map'][child_id]
+            all_descendants.append(child_chunk)
+
+            # Đệ quy
+            collect_descendants(child_chunk)
+
+    collect_descendants(chunk)
+
+    if not all_descendants:
+        return []
+
+    # Score tất cả descendants
+    scored_descendants = []
+    for desc in all_descendants:
+        score = score_descendant_relevance(desc, query, query_embedding)
+        if score >= min_score:
+            scored_descendants.append((desc, score))
+
+    # Sort by score và lấy top K
+    scored_descendants.sort(key=lambda x: x[1], reverse=True)
+    return scored_descendants[:max_descendants]
+
+
+def find_smart_siblings(
+    chunk: Dict,
+    query: str,
+    query_embedding: np.ndarray,
+    max_siblings: int = 3,
+    min_score: float = 0.5
+) -> List[Tuple[Dict, float]]:
+    """
+    Tìm siblings (anh chị em cùng cấp) có score cao nhất
+    Trả về: List of (sibling, score)
+    """
+    sibling_ids = chunk.get('metadata', {}).get('sibling_ids', [])
+
+    if not sibling_ids:
+        return []
+
+    # Score tất cả siblings
+    scored_siblings = []
+    for sibling_id in sibling_ids:
+        if sibling_id not in vector_store['chunk_map']:
+            continue
+
+        sibling_chunk = vector_store['chunk_map'][sibling_id]
+        score = score_descendant_relevance(sibling_chunk, query, query_embedding)
+
+        if score >= min_score:
+            scored_siblings.append((sibling_chunk, score))
+
+    # Sort by score và lấy top K
+    scored_siblings.sort(key=lambda x: x[1], reverse=True)
+    return scored_siblings[:max_siblings]
+
+
+def enrich_with_all_siblings(
+    chunks: List[Dict],
+    query: str,
+    query_embedding: np.ndarray,
+    include_parent_context: bool = True
+) -> List[Dict]:
+    """
+    MỚI: Làm giàu candidates bằng cách thêm TẤT CẢ sibling chunks.
+
+    Ví dụ:
+    - Nếu tìm được "Điểm c" về một tiêu chuẩn cụ thể
+    - Sẽ thêm luôn "Điểm a", "Điểm b", "Điểm d"... (tất cả siblings)
+    - LLM sẽ tự chọn đúng chunk dựa trên parent context
+
+    Args:
+        chunks: Danh sách chunks ban đầu
+        query: User query
+        query_embedding: Query embedding
+        include_parent_context: Có bao gồm parent context không
+
+    Returns:
+        Danh sách chunks đã được enriched với siblings
+    """
+    enriched_chunks = []
+    seen_chunk_ids = set()
+
+    for chunk in chunks:
+        chunk_id = chunk['chunk_id']
+
+        # Thêm chunk gốc
+        if chunk_id not in seen_chunk_ids:
+            enriched_chunks.append(chunk)
+            seen_chunk_ids.add(chunk_id)
+
+        # Lấy parent để hiểu ngữ cảnh
+        parent_id = chunk.get('metadata', {}).get('parent_id')
+        if not parent_id or parent_id not in vector_store['chunk_map']:
+            continue
+
+        parent_chunk = vector_store['chunk_map'][parent_id]
+
+        # Enrich based on parent's section type and number of siblings (LEVEL-BASED)
+        # Logic: Only enrich if parent is Khoản/Điều (mid-level sections)
+        # AND number of siblings is reasonable (≤10 to avoid explosion)
+        parent_type = parent_chunk['metadata'].get('section_type', '')
+        sibling_ids = chunk.get('metadata', {}).get('sibling_ids', [])
+        sibling_count = len(sibling_ids)
+
+        # Only enrich for mid-level sections with reasonable sibling count
+        should_enrich = (
+            parent_type in ['khoan', 'dieu'] and  # Khoản or Điều level
+            sibling_count > 0 and                 # Has siblings
+            sibling_count <= 10                   # Not too many (avoid explosion)
+        )
+
+        if not should_enrich:
+            continue
+
+        # Lấy TẤT CẢ siblings (anh chị em cùng cha)
+        sibling_ids = chunk.get('metadata', {}).get('sibling_ids', [])
+
+        for sibling_id in sibling_ids:
+            if sibling_id in seen_chunk_ids or sibling_id not in vector_store['chunk_map']:
+                continue
+
+            sibling_chunk = vector_store['chunk_map'][sibling_id].copy()
+
+            # Tính similarity cho sibling (để reranking sau này)
+            sibling_embedding = get_embedding(sibling_chunk['content'])
+            similarity = cosine_similarity(
+                query_embedding.reshape(1, -1),
+                sibling_embedding.reshape(1, -1)
+            )[0][0]
+
+            sibling_chunk['similarity'] = float(similarity)
+            sibling_chunk['enriched_from'] = chunk_id  # Đánh dấu là được enrich từ chunk nào
+
+            enriched_chunks.append(sibling_chunk)
+            seen_chunk_ids.add(sibling_id)
+
+    print(f"\n🔗 Sibling Enrichment: {len(chunks)} → {len(enriched_chunks)} chunks (added {len(enriched_chunks) - len(chunks)} siblings)")
+
+    # Debug: Show added siblings
+    added_siblings = [c for c in enriched_chunks if 'enriched_from' in c]
+    if added_siblings:
+        print(f"   📋 Added siblings:")
+        for sib in added_siblings[:5]:  # Show first 5
+            title = sib['metadata'].get('section_title', 'N/A')[:60]
+            from_chunk = sib.get('enriched_from', 'N/A')[:10]
+            sim = sib.get('similarity', 0)
+            print(f"      • {title:60s} | sim={sim:.3f} | from={from_chunk}")
+
+    return enriched_chunks
+
+
+# ==================== LEGAL STRUCTURE FORMATTING ====================
+
+def format_legal_path(metadata: Dict) -> str:
+    """
+    Tạo path theo cấu trúc pháp luật: Chương X > Điều Y > Khoản Z
+    """
+    section_type = metadata.get('section_type', '')
+    section_code = metadata.get('section_code', '')
+    section_title = metadata.get('section_title', '')
+
+    # Map type to Vietnamese label
+    type_labels = {
+        'chuong': 'Chương',
+        'dieu': 'Điều',
+        'khoan': 'Khoản',
+        'muc': 'Mục',
+        'diem': 'Điểm',
+        'root': ''
+    }
+
+    label = type_labels.get(section_type, '')
+
+    if not label or section_type == 'root':
+        return section_title
+
+    # Extract just the numeric part from section_code
+    # e.g., "I.3.4" -> for khoan, we want "Khoản 4"
+    code_parts = section_code.split('.')
+
+    if section_type == 'chuong' and len(code_parts) >= 1:
+        return f"{label} {code_parts[0]}: {section_title}"
+    elif section_type == 'dieu' and len(code_parts) >= 2:
+        return f"{label} {code_parts[1]}: {section_title}"
+    elif section_type == 'khoan' and len(code_parts) >= 3:
+        return f"{label} {code_parts[2]}"
+    elif section_type == 'muc' and len(code_parts) >= 4:
+        return f"{label} {code_parts[3]}"
+
+    return f"{label}: {section_title}"
+
+
+def build_legal_hierarchy_path(chunk: Dict) -> str:
+    """
+    Xây dựng full path theo hierarchy pháp luật
+    Có 2 patterns:
+    - Pattern 1 (không có Mục): Chương.Điều.Khoản (I.1.2)
+    - Pattern 2 (có Mục): Chương.Mục.Điều.Khoản (III.1.8.1)
+
+    Ví dụ: "Chương VI > Mục 2 > Điều 48 > Khoản 4"
+    """
+    path_parts = []
+    current_chunk = chunk
+
+    # Traverse up to root
+    visited = set()
+    while current_chunk:
+        chunk_id = current_chunk.get('chunk_id')
+        if chunk_id in visited:
+            break
+        visited.add(chunk_id)
+
+        metadata = current_chunk.get('metadata', {})
+        section_type = metadata.get('section_type', '')
+        section_code = metadata.get('section_code', '')
+        section_title = metadata.get('section_title', '')
+
+        # Build formatted section based on type
+        type_labels = {
+            'chuong': 'Chương',
+            'muc': 'Mục',
+            'dieu': 'Điều',
+            'khoan': 'Khoản',
+            'diem': 'Điểm',
+            'item_abc': 'Điểm'
+        }
+
+        label = type_labels.get(section_type, '')
+
+        if label and section_code:
+            code_parts = section_code.split('.')
+
+            # Extract the number for this level based on section_type
+            if section_type == 'chuong':
+                path_parts.insert(0, f"Chương {code_parts[0]}")
+            elif section_type == 'muc':
+                # Mục is always second part: III.1
+                path_parts.insert(0, f"Mục {code_parts[1]}")
+            elif section_type == 'dieu':
+                # Điều can be 2nd part (I.1) or 3rd part (III.1.8)
+                # If parent has type 'muc', then Điều is 3rd part
+                # Otherwise, Điều is 2nd part
+                parent_id = metadata.get('parent_id')
+                if parent_id and parent_id in vector_store['chunk_map']:
+                    parent = vector_store['chunk_map'][parent_id]
+                    parent_type = parent.get('metadata', {}).get('section_type', '')
+                    if parent_type == 'muc':
+                        # Pattern 2: Chương.Mục.Điều
+                        if len(code_parts) >= 3:
+                            path_parts.insert(0, f"Điều {code_parts[2]}")
+                    else:
+                        # Pattern 1: Chương.Điều
+                        if len(code_parts) >= 2:
+                            path_parts.insert(0, f"Điều {code_parts[1]}")
+                else:
+                    # Fallback: use last part
+                    path_parts.insert(0, f"Điều {code_parts[-1]}")
+
+            elif section_type == 'khoan':
+                # Khoản can be 3rd part (I.2.1) or 4th part (III.1.8.1)
+                # Use the last part
+                path_parts.insert(0, f"Khoản {code_parts[-1]}")
+
+            elif section_type in ['diem', 'item_abc']:
+                # Điểm is always the last part
+                path_parts.insert(0, f"Điểm {code_parts[-1]}")
+
+        # Move to parent
+        parent_id = metadata.get('parent_id')
+        if parent_id and parent_id in vector_store['chunk_map']:
+            current_chunk = vector_store['chunk_map'][parent_id]
+        else:
+            break
+
+    return ' > '.join(path_parts) if path_parts else section_title
+
+
+# ==================== GRAPH NAVIGATION ====================
+
+def find_parent_chunks(chunk: Dict, max_levels: int = 2) -> List[Dict]:
+    """Tìm các chunk cha"""
+    parents = []
+    current_chunk = chunk
+
+    for _ in range(max_levels):
+        parent_id = current_chunk.get('metadata', {}).get('parent_id')
+        if not parent_id or parent_id not in vector_store['chunk_map']:
+            break
+
+        parent_chunk = vector_store['chunk_map'][parent_id]
+        parents.append(parent_chunk)
+        current_chunk = parent_chunk
+
+    return parents
+
+
+def find_sibling_chunks(chunk: Dict, max_siblings: int = 2) -> List[Dict]:
+    """Tìm các chunk anh em"""
+    sibling_ids = chunk.get('metadata', {}).get('sibling_ids', [])
+    siblings = []
+
+    for sibling_id in sibling_ids[:max_siblings]:
+        if sibling_id in vector_store['chunk_map']:
+            siblings.append(vector_store['chunk_map'][sibling_id])
+
+    return siblings
+
+
+# ==================== MULTI-CHUNK WITH SMART MERGING ====================
+
+def check_hierarchy_overlap(chunk1: Dict, chunk2: Dict) -> Optional[str]:
+    """
+    Kiểm tra xem 2 chunks có overlap trong hierarchy không
+    Trả về: "chunk1_is_ancestor" | "chunk2_is_ancestor" | None
+    """
+    chunk1_id = chunk1['chunk_id']
+    chunk2_id = chunk2['chunk_id']
+
+    # Check if chunk1 is ancestor of chunk2
+    current = chunk2
+    for _ in range(10):  # Limit depth
+        parent_id = current.get('metadata', {}).get('parent_id')
+        if not parent_id:
+            break
+        if parent_id == chunk1_id:
+            return "chunk1_is_ancestor"
+        if parent_id not in vector_store['chunk_map']:
+            break
+        current = vector_store['chunk_map'][parent_id]
+
+    # Check if chunk2 is ancestor of chunk1
+    current = chunk1
+    for _ in range(10):
+        parent_id = current.get('metadata', {}).get('parent_id')
+        if not parent_id:
+            break
+        if parent_id == chunk2_id:
+            return "chunk2_is_ancestor"
+        if parent_id not in vector_store['chunk_map']:
+            break
+        current = vector_store['chunk_map'][parent_id]
+
+    return None
+
+
+def merge_chunks_smart(chunks: List[Dict], query: str, query_embedding: np.ndarray, settings: Dict) -> List[Dict]:
+    """
+    Merge chunks thông minh:
+    - Nếu chunk A là cha của chunk B → chỉ giữ A
+    - Nếu không overlap → giữ cả 2
+    """
+    if len(chunks) <= 1:
+        return chunks
+
+    # Check overlaps
+    keep_chunks = []
+    skip_indices = set()
+
+    for i, chunk1 in enumerate(chunks):
+        if i in skip_indices:
+            continue
+
+        is_redundant = False
+
+        for j, chunk2 in enumerate(chunks):
+            if i == j or j in skip_indices:
+                continue
+
+            overlap = check_hierarchy_overlap(chunk1, chunk2)
+
+            if overlap == "chunk2_is_ancestor":
+                # chunk2 là cha của chunk1 → skip chunk1, giữ chunk2
+                is_redundant = True
+                break
+            elif overlap == "chunk1_is_ancestor":
+                # chunk1 là cha của chunk2 → skip chunk2
+                skip_indices.add(j)
+
+        if not is_redundant:
+            keep_chunks.append(chunk1)
+
+    return keep_chunks
+
+
+# ==================== BUILD CONTEXT WITH ADAPTIVE SETTINGS ====================
+
+def build_enriched_context(
+    chunk: Dict,
+    query: str,
+    query_embedding: np.ndarray,
+    settings: Dict
+) -> str:
+    """
+    Làm giàu nội dung chunk theo settings adaptive
+    """
+    enriched_parts = []
+    metadata = chunk['metadata']
+
+    # 1. Parent context (nếu cần)
+    if settings.get('include_parents', True):
+        parents = find_parent_chunks(chunk, max_levels=2)
+        if parents:
+            enriched_parts.append("【 NGỮ CẢNH TỔNG QUÁT 】")
+            for i, parent in enumerate(parents, 1):
+                parent_title = parent['metadata'].get('section_title', 'Không rõ')
+                parent_path = ' > '.join(parent['metadata'].get('title_path', []))
+                enriched_parts.append(f"\n📂 Cấp cha {i}: {parent_title}")
+                enriched_parts.append(f"   Vị trí: {parent_path}")
+                enriched_parts.append(f"   {parent['content'][:300]}...")
+            enriched_parts.append("")
+
+    # 2. Main content
+    section_title = metadata.get('section_title', 'Không rõ')
+    legal_path = build_legal_hierarchy_path(chunk)
+
+    enriched_parts.append("【 NỘI DUNG CHÍNH 】")
+    enriched_parts.append(f"📌 Tiêu đề: {section_title}")
+    if legal_path:
+        enriched_parts.append(f"📜 Cấu trúc: {legal_path}")
+    enriched_parts.append(f"\n{chunk['content']}")
+    enriched_parts.append("")
+
+    # 3. Smart descendants (chỉ lấy những cái liên quan)
+    max_desc = settings.get('max_descendants', 5)
+    smart_descendants = find_smart_descendants(
+        chunk, query, query_embedding,
+        max_descendants=max_desc,
+        min_score=config.MIN_DESCENDANT_SCORE
+    )
+
+    if smart_descendants:
+        enriched_parts.append(f"【 CÁC MỤC CON LIÊN QUAN ({len(smart_descendants)}/{max_desc}) 】")
+        for i, (desc, score) in enumerate(smart_descendants, 1):
+            desc_meta = desc['metadata']
+            legal_path = build_legal_hierarchy_path(desc)
+            desc_level = desc_meta.get('level', 0)
+
+            indent = "  " * (desc_level - metadata.get('level', 0))
+
+            enriched_parts.append(f"\n{indent}🔸 [{i}] {legal_path} (score: {score:.2f})")
+            enriched_parts.append(f"{indent}   {desc['content']}")
+        enriched_parts.append("")
+
+    # 4. Smart siblings (anh chị em cùng cấp)
+    max_sib = settings.get('max_siblings', 0)
+    if max_sib > 0:
+        smart_siblings = find_smart_siblings(
+            chunk, query, query_embedding,
+            max_siblings=max_sib,
+            min_score=config.MIN_SIBLING_SCORE
+        )
+
+        if smart_siblings:
+            enriched_parts.append(f"【 CÁC MỤC CÙNG CẤP LIÊN QUAN ({len(smart_siblings)}/{max_sib}) 】")
+            for i, (sib, score) in enumerate(smart_siblings, 1):
+                sib_meta = sib['metadata']
+                legal_path = build_legal_hierarchy_path(sib)
+
+                enriched_parts.append(f"\n🔹 [{i}] {legal_path} (score: {score:.2f})")
+                enriched_parts.append(f"   {sib['content']}")
+            enriched_parts.append("")
+
+    return "\n".join(enriched_parts)
+
+
+def build_multi_chunk_context(
+    chunks: List[Dict],
+    query: str,
+    query_embedding: np.ndarray,
+    settings: Dict
+) -> List[ContextChunk]:
+    """
+    Build context từ nhiều chunks đã được merge
+    """
+    context_chunks = []
+
+    for idx, chunk in enumerate(chunks):
+        metadata = chunk['metadata']
+        title_path = ' > '.join(metadata.get('title_path', []))
+        legal_path = build_legal_hierarchy_path(chunk)
+
+        # Làm giàu từng chunk
+        enriched_content = build_enriched_context(chunk, query, query_embedding, settings)
+
+        # Use legal path if available, otherwise use title path
+        display_path = legal_path if legal_path else title_path
+
+        context_chunks.append(ContextChunk(
+            type="primary" if idx == 0 else "secondary",
+            heading=metadata.get('section_title', ''),
+            headingPath=display_path,  # Use legal path here
+            content=enriched_content,
+            similarity=chunk.get('similarity', 0.0),
+            importance=1.0 if idx == 0 else 0.8
+        ))
+
+    return context_chunks
+
+
+# ==================== RE-RANKING WITH LLM ====================
+
+def rerank_with_llm(query: str, chunks: List[Dict], top_k: int = 3) -> List[Dict]:
+    """
+    Re-rank chunks bằng LLM (Gemini Flash)
+    """
+    if len(chunks) <= top_k:
+        return chunks
+
+    # Tạo prompt cho LLM
+    chunks_text = ""
+    for i, chunk in enumerate(chunks):
+        title = chunk['metadata'].get('section_title', 'Không rõ')
+        content_preview = chunk['content'][:150]  # Giảm từ 300 xuống 150 chars
+        chunks_text += f"\n[{i}] {title}\n{content_preview}...\n"
+        # print(f"Chunk {i} preview: {content_preview[:100]}...")
+
+    prompt = f"""Bạn là hệ thống đánh giá độ liên quan của tài liệu.
+
+CÂU HỎI: {query}
+
+CÁC TÀI LIỆU:
+{chunks_text}
+
+NHIỆM VỤ: Xếp hạng các tài liệu từ LIÊN QUAN NHẤT đến ÍT LIÊN QUAN NHẤT.
+Chỉ trả về danh sách số thứ tự, cách nhau bởi dấu phẩy (ví dụ: 2,0,4,1,3)
+
+XẾP HẠNG:"""
+
+    try:
+        # Try Gemini first
+        print("🎯 Re-ranking with Gemini...")
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        print(prompt)
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.GenerationConfig(
+                temperature=0.0,
+                max_output_tokens=200  # Tăng từ 100 lên 200 để tránh MAX_TOKENS
+            ),
+            request_options={"timeout": 30}  # Add 30s timeout for re-ranking
+        )
+
+        # Check finish_reason
+        if response.candidates:
+            finish_reason = response.candidates[0].finish_reason
+            # finish_reason: 1=STOP (success), 2=MAX_TOKENS, 3=SAFETY, 5=OTHER
+            if finish_reason == 2:  # MAX_TOKENS
+                print(f"⚠️ Gemini re-ranking hit MAX_TOKENS, trying to parse partial response...")
+                # Try to parse partial response if available
+                try:
+                    if response.text:
+                        ranking_text = response.text.strip()
+                        indices = [int(x.strip()) for x in ranking_text.split(',') if x.strip().isdigit()]
+                        if indices:
+                            print(f"✓ Parsed {len(indices)} indices from partial response")
+                            # Continue with partial ranking
+                        else:
+                            raise Exception("Could not parse any indices from partial response")
+                    else:
+                        raise Exception("No text in partial response")
+                except Exception as parse_error:
+                    print(f"⚠️ Failed to parse partial response: {parse_error}, falling back to Ollama")
+                    raise Exception(f"Gemini re-ranking hit MAX_TOKENS and parsing failed")
+            elif finish_reason != 1:  # Not STOP (normal completion)
+                print(f"⚠️ Gemini re-ranking finish_reason={finish_reason}, falling back to Ollama")
+                raise Exception(f"Gemini re-ranking failed with finish_reason={finish_reason}")
+
+        # Parse ranking
+        ranking_text = response.text.strip() if response.text else ""
+        if not ranking_text:
+            raise Exception("Empty re-ranking response from Gemini")
+
+        indices = [int(x.strip()) for x in ranking_text.split(',') if x.strip().isdigit()]
+
+        # Reorder chunks
+        reranked = []
+        for idx in indices[:top_k]:
+            if 0 <= idx < len(chunks):
+                reranked.append(chunks[idx])
+
+        # Add remaining if needed
+        added_ids = {c['chunk_id'] for c in reranked}
+        for chunk in chunks:
+            if chunk['chunk_id'] not in added_ids and len(reranked) < top_k:
+                reranked.append(chunk)
+
+        return reranked[:top_k]
+
+    except Exception as e:
+        print(f"⚠️ Gemini re-ranking error: {e}")
+        print("🔄 Falling back to Ollama for re-ranking...")
+
+        try:
+            # Fallback to Ollama
+            response = ollama.chat(
+                model='qwen3:14b',
+                messages=[{
+                    'role': 'user',
+                    'content': prompt
+                }],
+                options={
+                    'temperature': 0.0,
+                    'num_predict': 100
+                }
+            )
+
+            # Parse ranking
+            ranking_text = response['message']['content'].strip()
+            indices = [int(x.strip()) for x in ranking_text.split(',') if x.strip().isdigit()]
+
+            # Reorder chunks
+            reranked = []
+            for idx in indices[:top_k]:
+                if 0 <= idx < len(chunks):
+                    reranked.append(chunks[idx])
+
+            # Add remaining if needed
+            added_ids = {c['chunk_id'] for c in reranked}
+            for chunk in chunks:
+                if chunk['chunk_id'] not in added_ids and len(reranked) < top_k:
+                    reranked.append(chunk)
+
+            return reranked[:top_k]
+
+        except Exception as ollama_error:
+            print(f"❌ Ollama re-ranking error: {ollama_error}")
+            print("⚠️ Using original order without re-ranking")
+            return chunks[:top_k]
+
+
+# ==================== INITIALIZE CROSS-ENCODER ====================
+
+# Initialize Cross-Encoder Reranker (after all classes are defined)
+cross_encoder_reranker = None
+if config.USE_CROSS_ENCODER and CROSS_ENCODER_AVAILABLE:
+    try:
+        cross_encoder_reranker = HybridReranker(config.CROSS_ENCODER_MODEL)
+    except Exception as e:
+        print(f"⚠️ Failed to initialize Cross-Encoder: {e}")
+        cross_encoder_reranker = None
+
+
+# ==================== MAIN GENERATION ====================
+
+def generate_answer(query: str, context_chunks: List[ContextChunk], intent: str) -> str:
+    """Generate answer với adaptive prompt theo intent"""
+    if not context_chunks:
+        return "Không tìm thấy thông tin liên quan."
+
+    # Build context
+    context_parts = []
+    for i, chunk in enumerate(context_chunks, 1):
+        context_parts.append(f"""
+═══════════════════════════════════════
+📜 CẤU TRÚC: {chunk.headingPath}
+📌 TIÊU ĐỀ: {chunk.heading}
+═══════════════════════════════════════
+
+{chunk.content}
+""")
+
+    context = "\n".join(context_parts)
+
+    # Adaptive instruction theo intent
+    intent_instructions = {
+        "specific": "Trả lời ngắn gọn, chính xác vào đúng điểm. Trích dẫn rõ ràng điều khoản.",
+        "comparison": "So sánh chi tiết các điểm giống và khác nhau. Dùng bảng nếu cần.",
+        "list": "Liệt kê đầy đủ tất cả các mục. Dùng bullet points hoặc số thứ tự.",
+        "explanation": "Giải thích chi tiết, rõ ràng. Có thể dùng ví dụ minh họa.",
+        "general": "Trả lời đầy đủ, có cấu trúc rõ ràng."
+    }
+
+    instruction = intent_instructions.get(intent, intent_instructions["general"])
+
+    prompt = f"""Bạn là trợ lý ảo hỗ trợ giải đáp về Thông tư tuyển sinh của các trường quân sự.
+
+NHIỆM VỤ:
+1. {instruction}
+2. Trích dẫn CHÍNH XÁC theo cấu trúc pháp luật (Chương X, Điều Y, Khoản Z)
+3. Giải thích dễ hiểu, chuyên nghiệp bằng tiếng Việt
+
+HƯỚNG DẪN TRÍCH DẪN VÀ NGỮ CẢNH (RẤT QUAN TRỌNG):
+
+1️⃣ **PHÂN BIỆT NGỮ CẢNH:**
+   - Mỗi phần có "📂 Cấp cha" và "📍 Vị trí" cho biết NGỮ CẢNH cụ thể
+   - CHÚ Ý: Các Điều/Khoản giống nhau có thể thuộc NGỮ CẢNH/ĐỐI TƯỢNG KHÁC NHAU
+   - PHẢI phân biệt rõ và trích dẫn KÈM THEO ngữ cảnh
+
+   VÍ DỤ PHÂN BIỆT ĐÚNG:
+   ✅ "Đối với tuyển sinh cán bộ cấp phân đội (Chương III > Điều 27)..."
+   ✅ "Đối với tuyển sinh chỉ huy trưởng (Chương VIII > Điều 68)..."
+
+   VÍ DỤ NHẦM LẪN NGỮ CẢNH (TRÁNH):
+   ❌ "Tổ hợp C00 được quy định tại cả Điều 68 và Điều 27"
+      (SAI vì không nói rõ đây là 2 đối tượng tuyển sinh khác nhau)
+
+2️⃣ **TRÍCH DẪN CHÍNH XÁC:**
+   - PHẢI trích dẫn theo "📜 CẤU TRÚC" (ví dụ: Chương III > Mục 5 > Điều 27)
+   - KHÔNG ĐƯỢC dùng "tài liệu 1/2", "tài liệu 2/2", "tài liệu 1", "tài liệu 2"
+   - KÈM THEO ngữ cảnh khi cần thiết
+
+   VÍ DỤ TRÍCH DẪN ĐÚNG:
+   ✅ "Theo Điều 27, Khoản 1, Điểm a (áp dụng cho tuyển sinh cán bộ cấp phân đội)..."
+   ✅ "Căn cứ Điều 68 (áp dụng cho tuyển sinh chỉ huy trưởng)..."
+
+   VÍ DỤ SAI (TUYỆT ĐỐI TRÁNH):
+   ❌ "Theo tài liệu 1/2..." hoặc "Trong tài liệu 2..."
+
+3️⃣ **QUY TẮC BỔ SUNG:**
+   - Đọc kỹ "📂 Cấp cha" và "📍 Vị trí" để hiểu ĐÚNG ngữ cảnh
+   - Nếu có nhiều phần với ngữ cảnh khác nhau, PHẢI liệt kê riêng biệt
+   - Nếu không đủ thông tin, nói rõ "Thông tin này không có trong tài liệu"
+   - KHÔNG suy đoán hay gộp chung các quy định từ ngữ cảnh khác nhau
+════════════════════════════════════════════════════════════════
+TÀI LIỆU THAM KHẢO
+════════════════════════════════════════════════════════════════
+
+{context}
+
+════════════════════════════════════════════════════════════════
+CÂU HỎI
+════════════════════════════════════════════════════════════════
+
+{query}
+
+════════════════════════════════════════════════════════════════
+TRẢ LỜI
+════════════════════════════════════════════════════════════════
+"""
+    print(prompt)
+    try:
+        # Try Gemini first
+        print("🤖 Using Gemini 2.5 Flash...")
+        model = genai.GenerativeModel(config.LLM_MODEL)
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.GenerationConfig(
+                temperature=0.3,
+                top_p=0.9,
+                max_output_tokens=2048,
+            ),
+            request_options={"timeout": 60}  # Add 60s timeout
+        )
+
+        # Check finish_reason
+        if response.candidates:
+            finish_reason = response.candidates[0].finish_reason
+            # 0=FINISH_REASON_UNSPECIFIED, 1=STOP, 2=MAX_TOKENS, 3=SAFETY, 4=RECITATION, 5=OTHER
+            if finish_reason == 2:  # MAX_TOKENS
+                print("⚠️ Gemini hit max tokens limit, response may be incomplete")
+                raise Exception("max tokens limit reached")
+            elif finish_reason == 3:  # SAFETY
+                print("⚠️ Gemini blocked by safety filters, falling back to Ollama")
+                raise Exception("Gemini safety filter triggered")
+            elif finish_reason == 5:  # OTHER
+                print("⚠️ Gemini stopped for unknown reason, falling back to Ollama")
+                raise Exception("Gemini stopped unexpectedly")
+
+        # Try to get text
+        if response.text:
+            return response.text
+        else:
+            print("⚠️ Gemini returned empty response, falling back to Ollama")
+            raise Exception("Empty response from Gemini")
+
+    except Exception as e:
+        print(f"⚠️ Gemini error: {e}")
+        print("🔄 Falling back to Ollama qwen3:14b...")
+
+        try:
+            # Fallback to Ollama qwen3:14b
+            response = ollama.chat(
+                model='qwen3:14b',
+                messages=[{
+                    'role': 'user',
+                    'content': prompt
+                }],
+                options={
+                    'temperature': 0.3,
+                    'top_p': 0.9,
+                    'num_predict': 2048
+                }
+            )
+            return response['message']['content']
+        except Exception as ollama_error:
+            print(f"❌ Ollama error: {ollama_error}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Both LLM providers failed. Gemini: {str(e)}, Ollama: {str(ollama_error)}"
+            )
+
+
+# ==================== API ENDPOINTS ====================
+
+@app.post("/api/documents/load-from-json")
+async def load_from_json(json_file_path: str = "output_admission/chunks.json"):
+    """Load chunks từ JSON"""
+    try:
+        print(f"\n{'='*80}")
+        print(f"📂 Loading chunks from: {json_file_path}")
+        print(f"{'='*80}")
+
+        json_path = Path(__file__).parent.parent / json_file_path
+        if not json_path.exists():
+            json_path = Path(json_file_path)
+
+        if not json_path.exists():
+            raise HTTPException(status_code=404, detail=f"JSON file not found: {json_file_path}")
+
+        with open(json_path, 'r', encoding='utf-8') as f:
+            chunks_data = json.load(f)
+
+        if not isinstance(chunks_data, list):
+            raise HTTPException(status_code=400, detail="JSON must be a list of chunks")
+
+        print(f"\n✓ Found {len(chunks_data)} chunks in JSON")
+
+        vector_store['chunks'].clear()
+        vector_store['embeddings'].clear()
+        vector_store['chunk_map'].clear()
+        vector_store['semantic_cache'].clear()
+
+        chunks_added = 0
+        chunk_sizes = []
+
+        # PHASE 1: Build chunk_map first (so parents are available for enrichment)
+        print(f"\n📦 Phase 1: Loading chunks into chunk_map...")
+        for chunk_data in chunks_data:
+            content = chunk_data.get('content', '').strip()
+            if not content:
+                continue
+
+            metadata = chunk_data.get('metadata', {})
+
+            chunk_obj = {
+                'chunk_id': chunk_data['chunk_id'],
+                'content': content,
+                'metadata': metadata,
+                'similarity': 0.0
+            }
+
+            vector_store['chunk_map'][chunk_data['chunk_id']] = chunk_obj
+
+        print(f"✓ Loaded {len(vector_store['chunk_map'])} chunks into chunk_map")
+
+        # PHASE 2: Generate embeddings with enriched text (now parents are available)
+        print(f"\n🔮 Phase 2: Generating enriched embeddings...")
+        for chunk_data in chunks_data:
+            content = chunk_data.get('content', '').strip()
+            if not content:
+                continue
+
+            metadata = chunk_data.get('metadata', {})
+            word_count = metadata.get('word_count', len(content.split()))
+            chunk_sizes.append(word_count)
+
+            # Build enriched text with parent context
+            enriched_text = build_enriched_text_for_embedding(chunk_data, vector_store)
+
+            # Generate embedding from enriched text
+            embedding = get_embedding(enriched_text)
+
+            # Get chunk from map (already created in Phase 1)
+            chunk_obj = vector_store['chunk_map'][chunk_data['chunk_id']]
+
+            # Add to chunks list and embeddings
+            vector_store['chunks'].append(chunk_obj)
+            vector_store['embeddings'].append(embedding)
+
+            chunks_added += 1
+
+            if chunks_added <= 10 or chunks_added % 20 == 0:
+                section_code = metadata.get('section_code', '')
+                section_title = metadata.get('section_title', '')
+                print(f"  ✓ [{section_code:15s}] {section_title[:50]:50s} ({word_count:4d} words)")
+
+        print(f"\n{'='*80}")
+        print(f"✅ Loaded {chunks_added} chunks successfully")
+        print(f"{'='*80}\n")
+
+        return {
+            "message": f"Loaded {chunks_added} chunks",
+            "totalDocuments": len(vector_store['chunks']),
+            "chunksAdded": chunks_added,
+            "chunkStats": {
+                "min": min(chunk_sizes) if chunk_sizes else 0,
+                "max": max(chunk_sizes) if chunk_sizes else 0,
+                "avg": sum(chunk_sizes) / len(chunk_sizes) if chunk_sizes else 0,
+                "total": chunks_added
+            }
+        }
+
+    except Exception as e:
+        print(f"\n❌ Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/query", response_model=QueryResponse)
+async def query_documents(request: QueryRequest):
+    """
+    Advanced Query với:
+    - Query Intent Analysis
+    - Query Expansion
+    - Semantic Caching
+    - Hybrid Search
+    - Smart Descendants
+    - Multi-chunk Smart Merging
+    - Re-ranking
+    - Adaptive Context
+    """
+    try:
+        if not vector_store['chunks']:
+            raise HTTPException(status_code=400, detail="No documents indexed yet")
+
+        print(f"\n{'='*80}")
+        print(f"🔍 Query: {request.query}")
+        print(f"{'='*80}\n")
+
+        # Get query embedding
+        query_embedding = get_embedding(request.query)
+
+        # Step 1: Check Semantic Cache
+        if config.USE_SEMANTIC_CACHE:
+            cached = SemanticCache.lookup(query_embedding, config.CACHE_SIMILARITY_THRESHOLD)
+            if cached:
+                print(f"✅ Cache HIT! (similarity: {cached['similarity']:.2%})")
+                print(f"   Original query: {cached['original_query']}")
+                response = cached['response']
+                response['metadata']['from_cache'] = True
+                response['metadata']['cache_similarity'] = cached['similarity']
+                return QueryResponse(**response)
+            print("❌ Cache MISS - proceeding with full retrieval")
+
+        # Step 2: Query Intent Analysis
+        intent_analysis = QueryAnalyzer.analyze(request.query)
+        intent = intent_analysis['intent']
+        print(f"\n📊 Query Analysis:")
+        print(f"   Intent: {intent}")
+        print(f"   Confidence: {intent_analysis['confidence']:.2%}")
+
+        # Get adaptive settings
+        settings = config.CONTEXT_SETTINGS.get(intent, config.CONTEXT_SETTINGS['general'])
+        print(f"   Settings: {settings}")
+
+        # Step 3: Query Expansion (if enabled)
+        if config.USE_QUERY_EXPANSION:
+            query_variations = QueryExpander.expand(request.query, intent)
+            print(f"\n🔄 Query Expansion: {len(query_variations)} variations")
+        else:
+            query_variations = [request.query]
+
+        # Step 4: Hybrid Search (with all query variations)
+        all_candidates = []
+        embeddings = np.array(vector_store['embeddings'])
+
+        for query_var in query_variations:
+            if query_var != request.query:
+                var_embedding = get_embedding(query_var)
+            else:
+                var_embedding = query_embedding
+
+            dense_scores = cosine_similarity(var_embedding.reshape(1, -1), embeddings)[0]
+
+            if config.USE_HYBRID_SEARCH:
+                documents_text = [chunk['content'] for chunk in vector_store['chunks']]
+                sparse_scores = BM25.calculate_bm25_scores(
+                    query_var, documents_text, config.BM25_K1, config.BM25_B
+                )
+                fused_scores = reciprocal_rank_fusion(
+                    dense_scores.tolist(), sparse_scores, config.RRF_K
+                )
+                top_indices = np.argsort(fused_scores)[-request.topK * 10:][::-1]  # Tăng từ 3 lên 10
+            else:
+                top_indices = np.argsort(dense_scores)[-request.topK * 10:][::-1]  # Tăng từ 3 lên 10
+
+            for idx in top_indices:
+                chunk = vector_store['chunks'][idx].copy()
+                chunk['similarity'] = float(dense_scores[idx])
+                all_candidates.append(chunk)
+
+        print(f"\n🔍 Stage 1 - Hybrid Search: {len(all_candidates)} candidates")
+
+        # Debug: Show top 10 candidates before deduplication
+        print(f"\n   📋 Top 10 candidates (before dedup):")
+        sorted_candidates = sorted(all_candidates, key=lambda x: x.get('similarity', 0), reverse=True)
+        for i, chunk in enumerate(sorted_candidates[:10]):
+            title = chunk['metadata'].get('section_title', 'N/A')[:60]
+            section_code = chunk['metadata'].get('section_code', 'N/A')[:15]
+            sim = chunk.get('similarity', 0)
+            print(f"      [{i+1:2d}] [{section_code:15s}] {title:60s} | sim={sim:.3f}")
+
+        # Step 5: Deduplication
+        if config.USE_DEDUPLICATION:
+            all_candidates = deduplicate_chunks(all_candidates, config.DEDUP_THRESHOLD)
+            print(f"🧹 Stage 2 - After Dedup: {len(all_candidates)} chunks")
+
+            # Debug: Show top 10 after dedup
+            print(f"\n   📋 Top 10 candidates (after dedup):")
+            sorted_after_dedup = sorted(all_candidates, key=lambda x: x.get('similarity', 0), reverse=True)
+            for i, chunk in enumerate(sorted_after_dedup[:10]):
+                title = chunk['metadata'].get('section_title', 'N/A')[:60]
+                section_code = chunk['metadata'].get('section_code', 'N/A')[:15]
+                sim = chunk.get('similarity', 0)
+                print(f"      [{i+1:2d}] [{section_code:15s}] {title:60s} | sim={sim:.3f}")
+
+        # Step 5.5: Sibling Enrichment - MỚI!
+        # Thêm tất cả sibling chunks để LLM có đủ context chọn đúng chunk
+        all_candidates = enrich_with_all_siblings(
+            all_candidates,
+            request.query,
+            query_embedding
+        )
+
+        # Step 6: Re-ranking (if enabled)
+        if config.USE_RERANKING and len(all_candidates) > settings['chunks']:
+            if config.USE_CROSS_ENCODER and cross_encoder_reranker:
+                # Use Cross-Encoder (fast & accurate)
+                all_candidates = cross_encoder_reranker.rerank(
+                    request.query,
+                    all_candidates,
+                    settings['chunks'] * 2,
+                    use_ensemble=config.RERANKER_ENSEMBLE
+                )
+                print(f"✅ Stage 3 - After Cross-Encoder Re-ranking: {len(all_candidates)} chunks")
+            else:
+                # Fallback to LLM re-ranking
+                all_candidates = rerank_with_llm(request.query, all_candidates, settings['chunks'] * 2)
+                print(f"🎯 Stage 3 - After LLM Re-ranking: {len(all_candidates)} chunks")
+
+            print(f"   Top chunks after re-ranking:")
+            for i, chunk in enumerate(all_candidates[:settings['chunks']]):
+                title = chunk['metadata'].get('section_title', 'Không rõ')[:50]
+                score = chunk.get('rerank_score', chunk.get('similarity', 0))
+                method = chunk.get('rerank_method', 'N/A')
+                print(f"   [{i+1}] {title} (score: {score:.3f}, method: {method})")
+
+        # Step 7: Multi-chunk Smart Merging
+        num_chunks = settings['chunks']
+        selected_chunks = all_candidates[:num_chunks * 2]  # Get more for merging
+        merged_chunks = merge_chunks_smart(selected_chunks, request.query, query_embedding, settings)
+        final_chunks = merged_chunks[:num_chunks]
+
+        print(f"🔗 Stage 4 - After Smart Merging: {len(final_chunks)} chunks")
+
+        # Debug: Show final chunks
+        print(f"\n   📋 Final {len(final_chunks)} chunks for context:")
+        for i, chunk in enumerate(final_chunks):
+            title = chunk['metadata'].get('section_title', 'N/A')[:60]
+            section_code = chunk['metadata'].get('section_code', 'N/A')[:15]
+            sim = chunk.get('similarity', 0)
+            rerank_score = chunk.get('rerank_score', 'N/A')
+            print(f"      [{i+1}] [{section_code:15s}] {title:60s} | sim={sim:.3f} | rerank={rerank_score}")
+
+        # Step 8: Build Context with Adaptive Settings
+        context_structure = build_multi_chunk_context(
+            final_chunks, request.query, query_embedding, settings
+        )
+
+        print(f"\n📊 Context Structure:")
+        print(f"   Chunks: {len(context_structure)}")
+        for i, chunk in enumerate(context_structure, 1):
+            # Count descendants
+            if i <= len(final_chunks):
+                smart_desc = find_smart_descendants(
+                    final_chunks[i-1], request.query, query_embedding,
+                    settings['max_descendants'], config.MIN_DESCENDANT_SCORE
+                )
+                print(f"   [{i}] {chunk.heading[:50]} - {len(smart_desc)} descendants")
+
+        # Step 9: Generate Answer
+        answer = generate_answer(request.query, context_structure, intent)
+
+        # Prepare response
+        retrieved_docs = []
+        for chunk in final_chunks:
+            metadata = chunk['metadata']
+            legal_path = build_legal_hierarchy_path(chunk)
+
+            retrieved_docs.append({
+                "filename": "Thông tư tuyển sinh",
+                "content": chunk['content'],
+                "similarity": chunk['similarity'],
+                "section_code": metadata.get('section_code', ''),
+                "section_title": metadata.get('section_title', ''),
+                "section_type": metadata.get('section_type', ''),
+                "legal_path": legal_path,  # Add legal hierarchy path
+                "title_path": ' > '.join(metadata.get('title_path', []))
+            })
+
+        response_data = {
+            "answer": answer,
+            "retrievedDocuments": retrieved_docs,
+            "contextStructure": {
+                "chunks": [chunk.dict() for chunk in context_structure],
+                "summary": {
+                    "primaryCount": sum(1 for c in context_structure if c.type == 'primary'),
+                    "secondaryCount": sum(1 for c in context_structure if c.type == 'secondary'),
+                    "totalCount": len(context_structure)
+                }
+            },
+            "metadata": {
+                "intent": intent,
+                "intent_confidence": intent_analysis['confidence'],
+                "settings_used": settings,
+                "query_variations": len(query_variations),
+                "from_cache": False
+            }
+        }
+
+        # Add to cache
+        if config.USE_SEMANTIC_CACHE:
+            SemanticCache.add(request.query, query_embedding, response_data)
+
+        return QueryResponse(**response_data)
+
+    except Exception as e:
+        print(f"\n❌ Query error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/health")
+async def health_check():
+    """Health check"""
+    return {
+        "status": "ok",
+        "service": "Advanced RAG API with Full Optimization",
+        "embedding_model": config.EMBEDDING_MODEL,
+        "llm_model": config.LLM_MODEL,
+        "features": {
+            "query_analysis": config.USE_QUERY_ANALYSIS,
+            "query_expansion": config.USE_QUERY_EXPANSION,
+            "hybrid_search": config.USE_HYBRID_SEARCH,
+            "graph_enrichment": config.USE_GRAPH_ENRICHMENT,
+            "deduplication": config.USE_DEDUPLICATION,
+            "reranking": config.USE_RERANKING,
+            "semantic_cache": config.USE_SEMANTIC_CACHE,
+            "cross_encoder": config.USE_CROSS_ENCODER and cross_encoder_reranker is not None,
+            "reranker_ensemble": config.RERANKER_ENSEMBLE
+        },
+        "reranking": {
+            "enabled": config.USE_RERANKING,
+            "method": "cross_encoder" if (config.USE_CROSS_ENCODER and cross_encoder_reranker) else "llm",
+            "model": config.CROSS_ENCODER_MODEL if (config.USE_CROSS_ENCODER and cross_encoder_reranker) else "gemini-2.5-flash",
+            "ensemble": config.RERANKER_ENSEMBLE if cross_encoder_reranker else False
+        },
+        "documents": len(vector_store['chunks']),
+        "cache_entries": len(vector_store['semantic_cache'])
+    }
+
+
+@app.get("/api/documents/count")
+async def get_document_count():
+    """Get total chunks"""
+    return {"count": len(vector_store['chunks'])}
+
+
+@app.delete("/api/documents")
+async def clear_documents():
+    """Clear all documents"""
+    vector_store['chunks'].clear()
+    vector_store['embeddings'].clear()
+    vector_store['chunk_map'].clear()
+    vector_store['semantic_cache'].clear()
+    return {"message": "All documents cleared successfully"}
+
+
+@app.get("/api/cache/stats")
+async def cache_stats():
+    """Get cache statistics"""
+    cache = vector_store['semantic_cache']
+
+    if not cache:
+        return {
+            "total_entries": 0,
+            "oldest": None,
+            "newest": None
+        }
+
+    timestamps = [entry['timestamp'] for entry in cache]
+
+    return {
+        "total_entries": len(cache),
+        "oldest": min(timestamps).isoformat(),
+        "newest": max(timestamps).isoformat()
+    }
+
+
+@app.delete("/api/cache")
+async def clear_cache():
+    """Clear semantic cache"""
+    vector_store['semantic_cache'].clear()
+    return {"message": "Cache cleared successfully"}
+
+
+# ============================================================================
+# LOGO MANAGEMENT API
+# ============================================================================
+
+# Load logos from JSON file
+def load_logos():
+    """Load logos from data/logos.json"""
+    try:
+        logos_file = Path("data/logos.json")
+        if logos_file.exists():
+            with open(logos_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('logos', [])
+        return []
+    except Exception as e:
+        print(f"Error loading logos: {e}")
+        return []
+
+def save_logos(logos):
+    """Save logos to data/logos.json"""
+    try:
+        logos_file = Path("data/logos.json")
+        logos_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(logos_file, 'w', encoding='utf-8') as f:
+            json.dump({'logos': logos}, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error saving logos: {e}")
+        return False
+
+# Initialize logo store
+logo_store = load_logos()
+
+
+@app.get("/api/logos")
+async def get_logos():
+    """Get all active logos for public display"""
+    active_logos = [logo for logo in logo_store if logo.get('active', True)]
+    return sorted(active_logos, key=lambda x: x.get('order', 0))
+
+
+@app.get("/api/admin/logos")
+async def get_all_logos():
+    """Get all logos (including inactive) for admin"""
+    return sorted(logo_store, key=lambda x: x.get('order', 0))
+
+
+@app.post("/api/admin/logos")
+async def create_logo(logo: dict):
+    """Create new logo"""
+    try:
+        # Generate ID if not provided
+        if 'id' not in logo:
+            logo['id'] = f"logo_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+        # Set defaults
+        if 'active' not in logo:
+            logo['active'] = True
+        if 'order' not in logo:
+            logo['order'] = len(logo_store) + 1
+        if 'createdAt' not in logo:
+            logo['createdAt'] = datetime.now().isoformat()
+
+        # Add to store
+        logo_store.append(logo)
+
+        # Save to file
+        if save_logos(logo_store):
+            return {"success": True, "logo": logo, "message": "Logo created successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to save logo")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/admin/logos/{logo_id}")
+async def update_logo(logo_id: str, updates: dict):
+    """Update existing logo"""
+    try:
+        # Find logo
+        logo_index = next((i for i, l in enumerate(logo_store) if l['id'] == logo_id), None)
+
+        if logo_index is None:
+            raise HTTPException(status_code=404, detail="Logo not found")
+
+        # Update fields
+        for key, value in updates.items():
+            if key != 'id' and key != 'createdAt':  # Don't allow changing ID or creation time
+                logo_store[logo_index][key] = value
+
+        # Save to file
+        if save_logos(logo_store):
+            return {"success": True, "logo": logo_store[logo_index], "message": "Logo updated successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to save logo")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/admin/logos/{logo_id}")
+async def delete_logo(logo_id: str):
+    """Delete logo"""
+    try:
+        # Find and remove logo
+        logo_index = next((i for i, l in enumerate(logo_store) if l['id'] == logo_id), None)
+
+        if logo_index is None:
+            raise HTTPException(status_code=404, detail="Logo not found")
+
+        deleted_logo = logo_store.pop(logo_index)
+
+        # Save to file
+        if save_logos(logo_store):
+            return {"success": True, "message": "Logo deleted successfully", "logo": deleted_logo}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to save changes")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/logos/reorder")
+async def reorder_logos(data: dict):
+    """Reorder logos"""
+    try:
+        order = data.get('order', [])
+
+        if not order:
+            raise HTTPException(status_code=400, detail="Order array is required")
+
+        # Update order for each logo
+        for idx, logo_id in enumerate(order):
+            logo_index = next((i for i, l in enumerate(logo_store) if l['id'] == logo_id), None)
+            if logo_index is not None:
+                logo_store[logo_index]['order'] = idx + 1
+
+        # Save to file
+        if save_logos(logo_store):
+            return {"success": True, "message": "Logos reordered successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to save changes")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Auto-load chunks on startup
+def auto_load_chunks():
+    """Auto-load chunks from output_admission/chunks.json on startup"""
+    try:
+        chunks_file = Path("output_admission/chunks.json")
+        if chunks_file.exists():
+            print(f"\n🔄 Auto-loading chunks from {chunks_file}...")
+            with open(chunks_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                chunks = data if isinstance(data, list) else data.get('chunks', [])
+
+                if chunks:
+                    # Process each chunk
+                    for chunk in chunks:
+                        # Get embedding for chunk content
+                        embedding_text = chunk.get('content', '')
+                        if config.USE_ENRICHED_EMBEDDINGS and chunk.get('parent_content'):
+                            parent_preview = chunk['parent_content'][:config.PARENT_CONTEXT_LENGTH]
+                            embedding_text = f"{parent_preview}\n\n{embedding_text}"
+
+                        embedding = get_embedding(embedding_text)
+
+                        # Add to store
+                        vector_store['chunks'].append(chunk)
+                        vector_store['embeddings'].append(embedding)
+                        vector_store['chunk_map'][chunk['chunk_id']] = chunk
+
+                    print(f"✅ Auto-loaded {len(chunks)} chunks successfully!")
+                    print(f"📊 Chunk stats: {min([len(c['content']) for c in chunks])}-{max([len(c['content']) for c in chunks])} chars")
+                else:
+                    print("⚠️ No chunks found in file")
+        else:
+            print(f"⚠️ Chunks file not found: {chunks_file}")
+    except Exception as e:
+        print(f"❌ Error auto-loading chunks: {e}")
+
+# Run auto-load on startup
+auto_load_chunks()
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8080)
