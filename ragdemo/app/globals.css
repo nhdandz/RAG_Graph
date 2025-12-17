@@ -1,0 +1,275 @@
+@import "tailwindcss";
+
+:root {
+  /* Military Theme Colors */
+  --military-green-dark: #2D5016;
+  --military-green: #4A7C2C;
+  --military-green-light: #6B9E4C;
+
+  --vietnam-red: #DA251D;
+  --vietnam-red-dark: #B91C1C;
+
+  --gold: #FFD700;
+  --gold-amber: #F59E0B;
+
+  --accent-teal: #14B8A6;
+  --accent-blue: #0EA5E9;
+  --accent-orange: #F97316;
+
+  /* Backgrounds */
+  --bg-primary: #F8FAFC;
+  --bg-secondary: #E2E8F0;
+  --bg-card: #FFFFFF;
+
+  /* Text */
+  --text-primary: #0F172A;
+  --text-secondary: #475569;
+  --text-muted: #94A3B8;
+
+  /* Original */
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  /* Military color palette */
+  --color-military-green-900: var(--military-green-dark);
+  --color-military-green-600: var(--military-green);
+  --color-military-green-400: var(--military-green-light);
+
+  --color-vietnam-red-600: var(--vietnam-red);
+  --color-vietnam-red-700: var(--vietnam-red-dark);
+
+  --color-gold-500: var(--gold);
+  --color-gold-600: var(--gold-amber);
+
+  --color-accent-teal: var(--accent-teal);
+  --color-accent-blue: var(--accent-blue);
+  --color-accent-orange: var(--accent-orange);
+
+  /* Original theme */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-primary: #0F172A;
+    --bg-secondary: #1E293B;
+    --bg-card: #1E293B;
+    --text-primary: #F8FAFC;
+    --text-secondary: #CBD5E1;
+    --text-muted: #64748B;
+
+    --background: #0a0a0a;
+    --foreground: #ffffff;
+  }
+}
+
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Military-specific utility classes */
+.military-gradient {
+  background: linear-gradient(135deg, var(--military-green-dark) 0%, var(--military-green) 100%);
+}
+
+.vietnam-flag-gradient {
+  background: linear-gradient(135deg, var(--vietnam-red) 0%, var(--vietnam-red-dark) 100%);
+}
+
+.gold-accent {
+  border-color: var(--gold);
+  box-shadow: 0 0 20px rgba(255, 215, 0, 0.3);
+}
+
+.gold-border {
+  border: 2px solid var(--gold);
+}
+
+/* Logo carousel animation */
+@keyframes fadeInOut {
+  0%, 100% { opacity: 0; transform: scale(0.95); }
+  10%, 90% { opacity: 1; transform: scale(1); }
+}
+
+.carousel-item {
+  animation: fadeInOut 5s ease-in-out infinite;
+}
+
+/* Smooth transitions */
+.transition-smooth {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Military button hover effect */
+.military-button-hover {
+  transition: all 0.2s ease;
+}
+
+.military-button-hover:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(74, 124, 44, 0.3);
+}
+
+/* Markdown Styles */
+.markdown-content {
+  line-height: 1.6;
+}
+
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4,
+.markdown-content h5,
+.markdown-content h6 {
+  font-weight: 700;
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+  color: var(--military-green);
+}
+
+.markdown-content h1 { font-size: 1.5em; }
+.markdown-content h2 { font-size: 1.3em; }
+.markdown-content h3 { font-size: 1.15em; }
+.markdown-content h4 { font-size: 1em; }
+
+.markdown-content p {
+  margin-bottom: 1em;
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  margin-bottom: 1em;
+  padding-left: 1.5em;
+}
+
+.markdown-content li {
+  margin-bottom: 0.25em;
+}
+
+.markdown-content ul {
+  list-style-type: disc;
+}
+
+.markdown-content ol {
+  list-style-type: decimal;
+}
+
+.markdown-content strong {
+  font-weight: 700;
+  color: var(--military-green);
+}
+
+.markdown-content em {
+  font-style: italic;
+}
+
+.markdown-content code {
+  background-color: rgba(74, 124, 44, 0.1);
+  padding: 0.2em 0.4em;
+  border-radius: 3px;
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+.markdown-content pre {
+  background-color: rgba(74, 124, 44, 0.1);
+  padding: 1em;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin-bottom: 1em;
+}
+
+.markdown-content pre code {
+  background-color: transparent;
+  padding: 0;
+}
+
+.markdown-content blockquote {
+  border-left: 3px solid var(--military-green);
+  padding-left: 1em;
+  margin-left: 0;
+  margin-bottom: 1em;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.markdown-content hr {
+  border: none;
+  border-top: 2px solid var(--military-green);
+  margin: 1.5em 0;
+}
+
+.markdown-content a {
+  color: var(--accent-blue);
+  text-decoration: underline;
+}
+
+.markdown-content a:hover {
+  color: var(--accent-teal);
+}
+
+.markdown-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-bottom: 1em;
+}
+
+.markdown-content th,
+.markdown-content td {
+  border: 1px solid #ddd;
+  padding: 0.5em;
+  text-align: left;
+}
+
+.markdown-content th {
+  background-color: rgba(74, 124, 44, 0.1);
+  font-weight: 700;
+}
+
+/* Dark mode styles */
+@media (prefers-color-scheme: dark) {
+  .markdown-content h1,
+  .markdown-content h2,
+  .markdown-content h3,
+  .markdown-content h4,
+  .markdown-content h5,
+  .markdown-content h6 {
+    color: var(--military-green-light);
+  }
+
+  .markdown-content strong {
+    color: var(--military-green-light);
+  }
+
+  .markdown-content code {
+    background-color: rgba(107, 158, 76, 0.2);
+  }
+
+  .markdown-content pre {
+    background-color: rgba(107, 158, 76, 0.2);
+  }
+
+  .markdown-content blockquote {
+    border-left-color: var(--military-green-light);
+  }
+
+  .markdown-content hr {
+    border-top-color: var(--military-green-light);
+  }
+
+  .markdown-content th {
+    background-color: rgba(107, 158, 76, 0.2);
+  }
+
+  .markdown-content th,
+  .markdown-content td {
+    border-color: #444;
+  }
+}

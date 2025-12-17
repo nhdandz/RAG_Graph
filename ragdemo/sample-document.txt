@@ -1,0 +1,45 @@
+RAG (Retrieval-Augmented Generation) Overview
+
+What is RAG?
+RAG is a technique that combines information retrieval with large language model generation. It allows AI systems to access and utilize external knowledge bases to generate more accurate and contextual responses.
+
+How RAG Works:
+1. Document Indexing: Documents are processed, split into chunks, and converted into vector embeddings using an embedding model.
+
+2. Storage: These embeddings are stored in a vector database for efficient similarity search.
+
+3. Retrieval: When a user asks a question, the query is converted into an embedding and similar documents are retrieved from the vector store.
+
+4. Augmentation: The retrieved documents are used as context to augment the prompt sent to the language model.
+
+5. Generation: The language model generates a response based on both the question and the retrieved context.
+
+Benefits of RAG:
+- Up-to-date Information: Can access the latest information without retraining the model
+- Reduced Hallucination: Grounds responses in actual documents
+- Domain Specific: Can be customized for specific domains or use cases
+- Cost Effective: No need to fine-tune large models
+- Transparent: Can show which documents were used to generate the answer
+
+Components of a RAG System:
+1. Embedding Model: Converts text into vector representations (e.g., BGE-M3, text-embedding-ada-002)
+2. Vector Database: Stores and searches embeddings (e.g., ChromaDB, Pinecone, Weaviate, FAISS)
+3. LLM: Generates the final answer (e.g., GPT-4, Claude, LLaMA)
+4. Orchestration: Coordinates the retrieval and generation process
+
+Best Practices:
+- Chunk documents appropriately (typically 500-1000 tokens)
+- Use overlap between chunks to maintain context
+- Implement re-ranking for better retrieval quality
+- Monitor and evaluate retrieval quality
+- Fine-tune chunk size based on your specific use case
+
+Use Cases:
+- Question answering systems
+- Customer support chatbots
+- Document search and summarization
+- Knowledge base queries
+- Research assistants
+- Code documentation search
+
+This demo uses Ollama with BGE-M3 for embeddings and LLaMA 3.2 for generation, with an in-memory vector store implementation.
