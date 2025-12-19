@@ -55,7 +55,7 @@ app.add_middleware(
 # Configuration
 class Config:
     # Gemini API
-    GEMINI_API_KEY = "AIzaSyBM2d63oq4whZNtQMxrCUd1KDtVItsSALA"
+    GEMINI_API_KEY = "AIzaSyBcaHjDX65FIhQCZJObVPO2wPt2iozHeAc"
     LLM_MODEL = "gemini-2.5-flash"
     EMBEDDING_MODEL = "bge-m3"
     # Feature flags
@@ -1692,7 +1692,7 @@ async def load_from_json(json_file_path: str = "output_admission/chunks.json"):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/query", response_model=QueryResponse)
+@app.post("/api/chat", response_model=QueryResponse)
 async def query_documents(request: QueryRequest):
     """
     Advanced Query với:

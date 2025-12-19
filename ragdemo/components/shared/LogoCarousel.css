@@ -1,23 +1,55 @@
-@keyframes scroll {
-  0% {
-    transform: translateX(0);
-  }
-  100% {
-    transform: translateX(-33.333%);
-  }
-}
-
-.logo-scroll-container {
-  animation: scroll 30s linear infinite;
-  width: max-content;
-}
-
-.logo-scroll-container.paused {
-  animation-play-state: paused;
-}
+/* Logo Carousel Slideshow Styles */
 
 .logo-carousel-wrapper {
   position: relative;
   width: 100%;
   overflow: hidden;
+}
+
+/* Slides container with smooth transition */
+.logo-slides-container {
+  transition: transform 0.6s ease-in-out;
+}
+
+/* Individual slide */
+.slide {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2rem;
+}
+
+/* Logo item hover effect */
+.logo-item {
+  transition: transform 0.3s ease;
+}
+
+.logo-item:hover {
+  transform: scale(1.1);
+}
+
+/* Pagination dots */
+.pagination-dots {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.pagination-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  transition: all 0.3s ease;
+  cursor: pointer;
+}
+
+.pagination-dot:hover {
+  opacity: 0.8;
+}
+
+/* Navigation buttons - show on hover */
+.logo-carousel-wrapper:hover .opacity-0 {
+  opacity: 1;
 }

@@ -12,7 +12,7 @@ export const ChatInterface: React.FC = () => {
   const [messages, setMessages] = useState<Array<{role: string, content: string}>>([]);
   const [loading, setLoading] = useState(false);
 
-  const API_BASE_URL = "http://localhost:8002";
+  const API_BASE_URL = "http://localhost:8080";
 
   const handleSend = async () => {
     if (!query.trim()) return;
@@ -23,7 +23,7 @@ export const ChatInterface: React.FC = () => {
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/chat`, {
+      const response = await fetch(`${API_BASE_URL}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: query, topK: 3 })
@@ -48,11 +48,11 @@ export const ChatInterface: React.FC = () => {
   };
 
   return (
-    <Card variant="military" className="h-full flex flex-col">
+    <Card variant="military" className="flex flex-col">
       {/* Header */}
       <div className="flex items-center justify-between mb-4 pb-4 border-b border-gray-200 dark:border-zinc-700">
         <div className="flex items-center gap-2">
-          <img src="/logos/icons8-chatbot-96.png" alt="AI Chatbot" className="w-8 h-8" />
+          <img src="/logos/logo_bot.png" alt="AI Chatbot" className="w-8 h-8" />
           <h2 className="text-xl font-bold text-military-green-900 dark:text-military-green-400">
             Trợ lý AI Tuyển sinh
           </h2>
@@ -68,7 +68,7 @@ export const ChatInterface: React.FC = () => {
       </div>
 
       {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto mb-4 space-y-4 min-h-[400px] max-h-[600px]">
+      <div className="overflow-y-auto mb-4 space-y-4 min-h-[500px] max-h-[700px]">
         {messages.length === 0 ? (
           <div className="text-center py-12">
             <div className="text-6xl mb-4">💬</div>
@@ -110,7 +110,7 @@ export const ChatInterface: React.FC = () => {
                     ? 'bg-accent-blue text-white'
                     : 'bg-military-green-600 text-white'
                 }`}>
-                  {msg.role === 'user' ? '👤' : <img src="/logos/icons8-chatbot-96.png" alt="AI" className="w-5 h-5" />}
+                  {msg.role === 'user' ? '👤' : <img src="/logos/logo_bot.png" alt="AI Chatbot" className="w-8 h-8" />}
                 </div>
 
                 {/* Message Bubble */}
@@ -153,7 +153,7 @@ export const ChatInterface: React.FC = () => {
       </div>
 
       {/* Input Area */}
-      <div className="flex gap-2">
+      <div className="flex gap-2 -mx-6 -mb-6 p-4 bg-gray-50 dark:bg-zinc-900 border-t border-gray-200 dark:border-zinc-700 rounded-b-lg">
         <input
           type="text"
           value={query}

@@ -1,31 +1,151 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import { LogoCarousel } from '../shared/LogoCarousel';
-import { getLogos } from '@/lib/api/logos';
 import type { Logo } from '@/lib/types/logo';
+
+// Danh sách logo tĩnh từ thư mục public/logos
+const STATIC_LOGOS: Logo[] = [
+  {
+    id: '1',
+    name: 'Quân đội Nhân dân Việt Nam',
+    imageUrl: '/logos/qdnd.jpg',
+    websiteUrl: '#',
+    order: 1,
+    active: true
+  },
+  {
+    id: '2',
+    name: 'Học viện Quân y',
+    imageUrl: '/logos/hocvienquany.webp',
+    websiteUrl: '#',
+    order: 2,
+    active: true
+  },
+  {
+    id: '3',
+    name: 'Học viện Hải quân',
+    imageUrl: '/logos/hocvienhaiquan.jpg',
+    websiteUrl: '#',
+    order: 3,
+    active: true
+  },
+  {
+    id: '4',
+    name: 'Học viện Biên phòng',
+    imageUrl: '/logos/hocvienbienphong.jpg',
+    websiteUrl: '#',
+    order: 4,
+    active: true
+  },
+  {
+    id: '5',
+    name: 'Học viện Không quân',
+    imageUrl: '/logos/hocvienkhqs.jpg',
+    websiteUrl: '#',
+    order: 5,
+    active: true
+  },
+  {
+    id: '6',
+    name: 'Học viện Phòng không - Không quân',
+    imageUrl: '/logos/hocvienpkkq.webp',
+    websiteUrl: '#',
+    order: 6,
+    active: true
+  },
+  {
+    id: '7',
+    name: 'Học viện Hậu cần',
+    imageUrl: '/logos/hvhk.jpg',
+    websiteUrl: '#',
+    order: 7,
+    active: true
+  },
+  {
+    id: '8',
+    name: 'Học viện Lục quân',
+    imageUrl: '/logos/hvlq.jpg',
+    websiteUrl: '#',
+    order: 8,
+    active: true
+  },
+  {
+    id: '9',
+    name: 'Học viện Kỹ thuật Quân sự',
+    imageUrl: '/logos/mta.png',
+    websiteUrl: '#',
+    order: 9,
+    active: true
+  },
+  {
+    id: '10',
+    name: 'Trường Sĩ quan Chính trị',
+    imageUrl: '/logos/truongsiquanchinhtri.jpg',
+    websiteUrl: '#',
+    order: 10,
+    active: true
+  },
+  {
+    id: '11',
+    name: 'Trường Sĩ quan Công binh',
+    imageUrl: '/logos/truongsiquancongbinh.webp',
+    websiteUrl: '#',
+    order: 11,
+    active: true
+  },
+  {
+    id: '12',
+    name: 'Trường Sĩ quan Đặc công',
+    imageUrl: '/logos/truongsiquandaccong.png',
+    websiteUrl: '#',
+    order: 12,
+    active: true
+  },
+  {
+    id: '13',
+    name: 'Trường Sĩ quan Không quân',
+    imageUrl: '/logos/truongsiquankhongquan.png',
+    websiteUrl: '#',
+    order: 13,
+    active: true
+  },
+  {
+    id: '14',
+    name: 'Trường Sĩ quan Pháo binh',
+    imageUrl: '/logos/truongsiquanphaobinh.jpg',
+    websiteUrl: '#',
+    order: 14,
+    active: true
+  },
+  {
+    id: '15',
+    name: 'Trường Sĩ quan Phòng hóa',
+    imageUrl: '/logos/truongsiquanphonghoa.png',
+    websiteUrl: '#',
+    order: 15,
+    active: true
+  },
+  {
+    id: '16',
+    name: 'Trường Sĩ quan Tăng - Thiết giáp',
+    imageUrl: '/logos/truongsiquantangthietgiap.png',
+    websiteUrl: '#',
+    order: 16,
+    active: true
+  },
+  {
+    id: '17',
+    name: 'Trường Sĩ quan Thông tin',
+    imageUrl: '/logos/truongsiquanthongtin.jpg',
+    websiteUrl: '#',
+    order: 17,
+    active: true
+  }
+];
 
 export const Footer: React.FC = () => {
   const currentYear = new Date().getFullYear();
-  const [logos, setLogos] = useState<Logo[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-
-  useEffect(() => {
-    // Load logos from API
-    const loadLogos = async () => {
-      try {
-        const data = await getLogos();
-        setLogos(data);
-      } catch (error) {
-        console.error('Failed to load logos:', error);
-        setLogos([]);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    loadLogos();
-  }, []);
 
   return (
     <footer className="mt-12 bg-military-green-900 text-white">
@@ -35,13 +155,7 @@ export const Footer: React.FC = () => {
           <p className="text-center text-gold-500 text-sm font-semibold mb-4">
             CÁC TRƯỜNG QUÂN SỰ THAM GIA TUYỂN SINH
           </p>
-          {isLoading ? (
-            <div className="flex justify-center items-center h-24">
-              <div className="animate-spin w-8 h-8 border-4 border-gold-500 border-t-transparent rounded-full"></div>
-            </div>
-          ) : (
-            <LogoCarousel logos={logos} autoplayInterval={5000} pauseOnHover={true} />
-          )}
+          <LogoCarousel logos={STATIC_LOGOS} autoplayInterval={5000} pauseOnHover={true} />
         </div>
       </div>
 
